@@ -1,13 +1,57 @@
 {
   "name": "@web3alert/sdk",
   "version": "2.2.3",
-  "description": "Shared code",
+  "description": "TypeScript SDK for building distributed microservices and event-driven applications on NATS",
   "author": "Web3alert Team <info@web3alert.io>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/web3alert/sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/web3alert/sdk/issues"
+  },
+  "homepage": "https://github.com/web3alert/sdk#readme",
+  "keywords": [
+    "web3",
+    "web3alert",
+    "sdk",
+    "nats",
+    "jetstream",
+    "microservices",
+    "distributed",
+    "event-driven",
+    "messaging",
+    "pubsub",
+    "blockchain",
+    "typescript"
+  ],
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "dependencies": {
     "@web3alert/types": "^4.0.0",
     "amqp-connection-manager": "^4.1.14",
