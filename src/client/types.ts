@@ -18,7 +18,7 @@ export type Link = {
 
 export type TriggerOutput = {
   title?: string;
-  message: MessageVariants;
+  message?: MessageVariants;
   links?: Link[];
   icon?: string;
   cover?: string;
