@@ -2,7 +2,16 @@ import { type Callback, type UseSpawnCallback } from './types';
 import { oneshot } from './utils';
 
 export async function interruption(): Promise<void> {
-  return new Promise(resolve => process.once('SIGINT', resolve));
+  return new Promise(resolve => {
+    const done = (): void => {
+      process.removeListener('SIGINT', done);
+      process.removeListener('SIGTERM', done);
+      resolve();
+    };
+
+    process.once('SIGINT', done);
+    process.once('SIGTERM', done);
+  });
 }
 
 export type MainCallback = (
