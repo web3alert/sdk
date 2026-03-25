@@ -183,6 +183,22 @@ export type StreamSubscriptionParams<T> = {
   options?: Partial<StreamSubscriptionOptions>;
 };
 
+function isMissingJetStreamResourceError(err: unknown): boolean {
+  if (!(err instanceof NatsError)) {
+    return false;
+  }
+  
+  const description = err.api_error?.description ?? err.message;
+  
+  return (
+    err.code == '404'
+    && (
+      description == 'stream not found'
+      || description == 'consumer not found'
+    )
+  );
+}
+
 export class StreamSubscription<T> {
   private _telemetry: Telemetry;
   private _core: Core;
@@ -282,15 +298,42 @@ export class StreamSubscription<T> {
   }
   
   public async destroy(): Promise<void> {
-    this._terminator.abort();
-    await this._loop;
-    await this._queue.drained();
+    this._terminator?.abort();
+    
+    try {
+      await this._loop;
+    } catch (err) {
+      if (!isMissingJetStreamResourceError(err)) {
+        throw err;
+      }
+    }
+    
+    if (this._queue) {
+      await this._queue.drained();
+    }
+    
     this._telemetry.destroy();
   }
   
   private async _consume(): Promise<void> {
     while (!this._terminator.signal.aborted) {
-      const messages = await this._consumer.fetch({ max_messages: 20 });
+      let messages;
+      
+      try {
+        messages = await this._consumer.fetch({ max_messages: 20 });
+      } catch (err) {
+        if (this._terminator.signal.aborted || isMissingJetStreamResourceError(err)) {
+          this._telemetry.warn({
+            err,
+            ref: this._ref,
+            name: this._name,
+          }, 'stream subscription stopped while underlying jetstream resource was removed');
+          
+          return;
+        }
+        
+        throw err;
+      }
       
       for await (const message of messages) {
         this._queue.push(message);

@@ -62,6 +62,10 @@ export type CoreOptions = {
   uncaughtException: ErrorCallback;
 };
 
+export type CoreCallOptions = {
+  timeoutMs?: number;
+};
+
 export class Core {
   public telemetry: Telemetry;
   public autoabortable: Autoabortable;
@@ -248,12 +252,12 @@ export class Core {
     return subscription;
   }
   
-  public async call<P, R>(method: string, params: P): Promise<R> {
+  public async call<P, R>(method: string, params: P, options?: CoreCallOptions): Promise<R> {
     this.telemetry.trace({ method }, 'call');
     
     try {
       const message = await this.nats.request(method, this.encode(params), {
-        timeout: 5000,
+        timeout: options?.timeoutMs ?? 5000,
       });
       const response = this.decode(message.data);
       

@@ -8,6 +8,18 @@ export type BucketMutateCallback<T, R> = (
   write: (next: T) => Promise<T>,
 ) => Promise<R>;
 
+export type BucketEntry<T> =
+  | {
+      operation: 'PUT';
+      revision: number;
+      value: T;
+    }
+  | {
+      operation: 'DEL';
+      revision: number;
+    }
+;
+
 export type BucketWatchOptions = {
   filter?: string;
   detach?: boolean;
@@ -82,6 +94,26 @@ export class Bucket<T> extends Autodestructible {
     }
     
     return this._core.decode(entry.value) as T;
+  }
+
+  public async entry(key: string): Promise<BucketEntry<T> | undefined> {
+    const entry = await this._kv.get(key);
+    if (!entry) {
+      return undefined;
+    }
+
+    if (entry.operation == 'PUT') {
+      return {
+        operation: 'PUT',
+        revision: entry.revision,
+        value: this._core.decode(entry.value) as T,
+      };
+    }
+
+    return {
+      operation: 'DEL',
+      revision: entry.revision,
+    };
   }
   
   public async put(key: string, value: T): Promise<void> {
@@ -191,6 +223,10 @@ export class BucketSlice<T> {
   public async get(key: string): Promise<T | undefined> {
     return await this._parent.get(`${this._prefix}.${key}`);
   }
+
+  public async entry(key: string): Promise<BucketEntry<T> | undefined> {
+    return await this._parent.entry(`${this._prefix}.${key}`);
+  }
   
   public async put(key: string, value: T): Promise<void> {
     await this._parent.put(`${this._prefix}.${key}`, value);
@@ -247,6 +283,10 @@ export class BucketCell<T> {
   
   public async get(): Promise<T | undefined> {
     return await this._parent.get(this._key);
+  }
+
+  public async entry(): Promise<BucketEntry<T> | undefined> {
+    return await this._parent.entry(this._key);
   }
   
   public async put(value: T): Promise<void> {
