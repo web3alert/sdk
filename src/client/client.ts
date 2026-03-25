@@ -11,6 +11,7 @@ import {
   type InferTriggerOutput,
   type TriggerRunner,
   type TriggerTester,
+  type TriggerLifecycleHooks,
   type TriggerRef,
   type Trigger,
   TriggerImpl,
@@ -31,6 +32,7 @@ export type ClientTriggerParams<D extends TriggerDefinition> = {
   name: string;
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
+  hooks?: TriggerLifecycleHooks;
 };
 
 export type ClientSubscribeParams<D extends TriggerDefinition> = {
@@ -168,6 +170,7 @@ export class Client extends BaseClientStack {
       name,
       runner,
       tester,
+      hooks,
     } = params;
     
     return this._use(async () => {
@@ -177,6 +180,7 @@ export class Client extends BaseClientStack {
         name: this.namespace.trigger(name),
         runner,
         tester,
+        hooks,
       });
       await trigger.init();
       

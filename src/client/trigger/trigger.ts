@@ -14,6 +14,7 @@ import {
   type InferTriggerInput,
   type InferTriggerOutput,
   type InferTriggerTest,
+  type TriggerLifecycleHooks,
   type TriggerRef,
   type Trigger,
   type TriggerRunner,
@@ -53,6 +54,7 @@ export type TriggerImplParams<D extends TriggerDefinition> = {
   name: string;
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
+  hooks?: TriggerLifecycleHooks;
 };
 
 export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
@@ -61,6 +63,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   private _name: string;
   private _runner: TriggerRunner<D>;
   private _tester: TriggerTester<D>;
+  private _hooks?: TriggerLifecycleHooks;
   private _emitter!: Emitter<InferTriggerInput<D>>;
   private _stream!: Stream<InferTriggerOutput<D>>;
   private _tasks!: BucketSlice<TriggerTask<InferTriggerParams<D>>>;
@@ -69,6 +72,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   private _state!: BucketCell<TriggerState>;
   private _timer!: Timer;
   private _service!: Service;
+  private _tasksActive = false;
   
   constructor(params: TriggerImplParams<D>) {
     const {
@@ -77,6 +81,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
       name,
       runner,
       tester,
+      hooks,
     } = params;
     
     this._telemetry = telemetry;
@@ -84,6 +89,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
     this._name = name;
     this._runner = runner;
     this._tester = tester;
+    this._hooks = hooks;
     
     this.init = this._telemetry.wrap('init', this.init);
     this.destroy = this._telemetry.wrap('destroy', this.destroy);
@@ -194,6 +200,8 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
               
               await this._tasks.delete(fixedKey);
             }
+
+            await this._syncTasksActiveState();
             
             state.lastCleanupAt = now;
             
@@ -219,6 +227,8 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
             timestamp: now.toISOString(),
             params,
           });
+
+          await this._syncTasksActiveState();
           
           ctx.res.data = { stream: this._stream.ref, key };
         } catch (err) {
@@ -242,10 +252,16 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           throw err;
         }
       });
+
+      await this._syncTasksActiveState();
     });
   }
   
   public async destroy(): Promise<void> {
+    if (this._tasksActive) {
+      await this._hooks?.onTasksActiveChange?.(false);
+      this._tasksActive = false;
+    }
     await this._service.destroy();
     await this._timer.destroy();
     await this._spawner.destroy();
@@ -292,5 +308,20 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   
   public get ref(): TriggerRef<D> {
     return { name: this._name };
+  }
+
+  private async _syncTasksActiveState(): Promise<void> {
+    if (!this._hooks?.onTasksActiveChange) {
+      return;
+    }
+
+    const keys = await this._tasks.keys();
+    const nextActive = keys.length > 0;
+    if (nextActive == this._tasksActive) {
+      return;
+    }
+
+    this._tasksActive = nextActive;
+    await this._hooks.onTasksActiveChange(nextActive);
   }
 }

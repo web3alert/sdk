@@ -39,6 +39,10 @@ export type TriggerRunner<D extends TriggerDefinition> =
 export type TriggerTester<D extends TriggerDefinition> =
   TriggerTestCallback<InferTriggerTest<D>, InferTriggerInput<D>>;
 
+export type TriggerLifecycleHooks = {
+  onTasksActiveChange?: (active: boolean) => Promise<void>;
+};
+
 export type Trigger<D extends TriggerDefinition> = {
   execute(input: InferTriggerInput<D>): Promise<void>;
   test(test: InferTriggerTest<D>, params: InferTriggerParams<D>): Promise<InferTriggerOutput<D>[]>;
