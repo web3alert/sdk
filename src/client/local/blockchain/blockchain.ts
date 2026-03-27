@@ -13,6 +13,8 @@ export type BlockchainUpstreamSpec<S> = {
 
 export type BlockchainOptions = {
   upstreamTimeout: number;
+  upstreamAcquireTimeout: number;
+  upstreamAcquirePoll: number;
 };
 
 export type BlockchainParams<S, B extends Backend> = {
@@ -50,6 +52,8 @@ export class Blockchain<S, B extends Backend> {
     this._factory = factory;
     this._options = defaults(options, {
       upstreamTimeout: 30_000,
+      upstreamAcquireTimeout: 1_000,
+      upstreamAcquirePoll: 100,
     });
     this._upstreams = new Map();
     this._block = -1;
@@ -177,18 +181,34 @@ export class Blockchain<S, B extends Backend> {
   }
   
   public async upstream(): Promise<B | undefined> {
-    const now = Date.now();
-    const online = this._online(now);
+    const deadline = Date.now() + this._options.upstreamAcquireTimeout;
     
-    if (online.length == 0) {
-      return undefined;
+    while (true) {
+      const now = Date.now();
+      const online = this._online(now)
+        .map(upstream => upstream.backend)
+        .filter((backend): backend is B => backend != undefined)
+      ;
+      
+      if (online.length > 0) {
+        const index = Math.floor(Math.random() * online.length);
+        return online[index];
+      }
+      
+      if (now >= deadline) {
+        return undefined;
+      }
+      
+      const delay = Math.min(
+        this._options.upstreamAcquirePoll,
+        Math.max(deadline - now, 0),
+      );
+      
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, delay);
+        timer.unref?.();
+      });
     }
-    
-    const index = Math.floor(Math.random() * online.length);
-    const upstream = online[index];
-    const backend = upstream.backend;
-    
-    return backend;
   }
 }
 

@@ -40,6 +40,10 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
   private _subscription!: StreamSubscription<InferTriggerOutput<D>>;
   private _timer!: Timer;
   private _service!: Service;
+  private _subscriptionKey?: string;
+  private _subscriptionBroken: boolean;
+  private _restore?: Promise<void>;
+  private _destroying: boolean;
   
   constructor(params: SubscriptionImplParams<D>) {
     const {
@@ -57,6 +61,8 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
     this._trigger = trigger;
     this._params = subscriptionParams;
     this._callback = callback;
+    this._subscriptionBroken = false;
+    this._destroying = false;
   }
   
   public async init(): Promise<void> {
@@ -69,31 +75,100 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
       });
     };
     
-    const subscribeResult = await callSubscribe();
-    const { stream, key } = subscribeResult;
-    const subscriptionName = (key) ? `${this._name}.${key}` : this._name;
-    
-    this._subscription = await this._core.stream.subscribe<InferTriggerOutput<D>>(
-      this._telemetry.child('events', {
-        labels: {
-          trigger: this._trigger.name,
-          subscription: this._name,
+    const attachStream = async (subscribeResult: TriggerSubscribeResult): Promise<void> => {
+      const { stream, key } = subscribeResult;
+      const subscriptionName = (key) ? `${this._name}.${key}` : this._name;
+      
+      this._subscriptionKey = key;
+      this._subscriptionBroken = false;
+      this._subscription = await this._core.stream.subscribe<InferTriggerOutput<D>>(
+        this._telemetry.child('events', {
+          labels: {
+            trigger: this._trigger.name,
+            subscription: this._name,
+          },
+        }),
+        subscriptionName,
+        stream,
+        async message => {
+          await this._callback(message.data);
         },
-      }),
-      subscriptionName,
-      stream,
-      async message => {
-        await this._callback(message.data);
-      },
-      {
-        filter: key,
-        concurrency: 10,
+        {
+          filter: key,
+          concurrency: 10,
+          error: err => {
+            if (this._destroying) {
+              return;
+            }
+            
+            this._subscriptionBroken = true;
+            this._telemetry.warn({
+              err,
+              trigger: this._trigger.name,
+              subscription: this._name,
+            }, 'runtime stream subscription failed, scheduling restore');
+            void restoreStream('stream-error');
+          },
+        },
+      );
+    };
+    
+    const restoreStream = async (reason: string): Promise<void> => {
+      if (this._destroying || this._restore) {
+        return await this._restore;
       }
-    );
+      
+      this._restore = (async () => {
+        try {
+          const subscribeResult = await callSubscribe();
+          const previous = this._subscription;
+          this._subscriptionBroken = true;
+          this._subscription = undefined as typeof this._subscription;
+          
+          if (previous) {
+            try {
+              await previous.destroy();
+            } catch (err) {
+              this._telemetry.warn({
+                err,
+                trigger: this._trigger.name,
+                subscription: this._name,
+                reason,
+              }, 'failed to destroy broken runtime stream subscription');
+            }
+          }
+          
+          await attachStream(subscribeResult);
+          this._telemetry.info({
+            trigger: this._trigger.name,
+            subscription: this._name,
+            reason,
+            key: this._subscriptionKey,
+          }, 'runtime stream subscription restored');
+        } catch (err) {
+          this._telemetry.error({
+            err,
+            trigger: this._trigger.name,
+            subscription: this._name,
+            reason,
+          }, 'failed to restore runtime stream subscription');
+        } finally {
+          this._restore = undefined;
+        }
+      })();
+      
+      return await this._restore;
+    };
+    
+    const subscribeResult = await callSubscribe();
+    await attachStream(subscribeResult);
     
     const p = this._core.options.heartbeatInterval;
-    this._timer = await this._core.localTimer(`${subscriptionName}.heartbeat`, p, async () => {
+    this._timer = await this._core.localTimer(`${this._name}.heartbeat`, p, async () => {
       await callSubscribe();
+      if (this._subscriptionBroken) {
+        await restoreStream('heartbeat');
+      }
     });
     
     this._service = await this._core.service(`subscription.${this._name}.api`);
@@ -116,9 +191,15 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
   }
   
   public async destroy(): Promise<void> {
+    this._destroying = true;
     await this._service.destroy();
     await this._timer.destroy();
-    await this._subscription.destroy();
+    if (this._restore) {
+      await this._restore;
+    }
+    if (this._subscription) {
+      await this._subscription.destroy();
+    }
     this._telemetry.destroy();
   }
   

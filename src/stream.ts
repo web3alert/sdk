@@ -191,10 +191,37 @@ function isMissingJetStreamResourceError(err: unknown): boolean {
   const description = err.api_error?.description ?? err.message;
   
   return (
-    err.code == '404'
+    (
+      err.code == '404'
+      && (
+        description == 'stream not found'
+        || description == 'consumer not found'
+      )
+    )
+    || (
+      err.code == '409'
+      && (
+        description == 'consumer deleted'
+      )
+    )
+  );
+}
+
+function isJetStreamResourceStoppedError(err: unknown): boolean {
+  if (isMissingJetStreamResourceError(err)) {
+    return true;
+  }
+  
+  if (!(err instanceof NatsError)) {
+    return false;
+  }
+  
+  const description = err.api_error?.description ?? err.message;
+  
+  return (
+    err.code == '409'
     && (
-      description == 'stream not found'
-      || description == 'consumer not found'
+      description == 'consumer deleted'
     )
   );
 }
@@ -213,6 +240,7 @@ export class StreamSubscription<T> {
   private _terminator!: AbortController;
   private _queue!: fastq.queueAsPromised<JsMsg, void>;
   private _loop!: Promise<void>;
+  private _loopError?: unknown;
   
   private _gaugeLastConsumedSeq: Gauge;
   
@@ -293,20 +321,39 @@ export class StreamSubscription<T> {
       this._consumer = await this._core.js.consumers.get(info.stream_name, info.name);
       this._terminator = new AbortController();
       this._queue = fastq.promise(this._handleMessage, this._concurrency);
-      this._loop = this._consume();
+      this._loop = this._consume().catch(async err => {
+        this._loopError = err;
+        
+        if (this._terminator.signal.aborted) {
+          this._telemetry.warn({
+            err,
+            ref: this._ref,
+            name: this._name,
+          }, 'stream subscription stopped while underlying jetstream resource was removed');
+          return;
+        }
+        
+        if (this._error) {
+          try {
+            await this._error(err);
+            return;
+          } catch (callbackErr) {
+            this._core.warn(new Web3alertError('stream subscription error callback failed', {
+              cause: callbackErr,
+              details: { ref: this._ref, name: this._name },
+            }));
+          }
+        }
+        
+        this._core.uncaughtException(err);
+      });
     });
   }
   
   public async destroy(): Promise<void> {
     this._terminator?.abort();
     
-    try {
-      await this._loop;
-    } catch (err) {
-      if (!isMissingJetStreamResourceError(err)) {
-        throw err;
-      }
-    }
+    await this._loop;
     
     if (this._queue) {
       await this._queue.drained();
@@ -318,11 +365,13 @@ export class StreamSubscription<T> {
   private async _consume(): Promise<void> {
     while (!this._terminator.signal.aborted) {
       let messages;
+      let messagesClosed: Promise<void | Error> | undefined;
       
       try {
         messages = await this._consumer.fetch({ max_messages: 20 });
+        messagesClosed = messages.closed().catch(err => err as Error);
       } catch (err) {
-        if (this._terminator.signal.aborted || isMissingJetStreamResourceError(err)) {
+        if (this._terminator.signal.aborted) {
           this._telemetry.warn({
             err,
             ref: this._ref,
@@ -335,8 +384,31 @@ export class StreamSubscription<T> {
         throw err;
       }
       
-      for await (const message of messages) {
-        this._queue.push(message);
+      let streamErr: unknown;
+      
+      try {
+        for await (const message of messages) {
+          this._queue.push(message);
+        }
+      } catch (err) {
+        streamErr = err;
+      }
+      
+      const closedErr = await messagesClosed;
+      const err = streamErr ?? closedErr;
+      
+      if (err) {
+        if (this._terminator.signal.aborted) {
+          this._telemetry.warn({
+            err,
+            ref: this._ref,
+            name: this._name,
+          }, 'stream subscription stopped while underlying jetstream resource was removed');
+          
+          return;
+        }
+        
+        throw err;
       }
       
       await this._queue.drained();
