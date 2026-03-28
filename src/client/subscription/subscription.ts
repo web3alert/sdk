@@ -123,7 +123,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
           const subscribeResult = await callSubscribe();
           const previous = this._subscription;
           this._subscriptionBroken = true;
-          this._subscription = undefined as typeof this._subscription;
+          this._subscription = undefined as unknown as typeof this._subscription;
           
           if (previous) {
             try {

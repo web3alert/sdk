@@ -42,10 +42,12 @@ export type TriggerSubscribeResult = {
 export type TriggerTestParams<P, T> = {
   params: P;
   values: T;
+  itemIndex?: number;
 };
 
 export type TriggerTestResult<E> = {
   events: E[];
+  count?: number;
 };
 
 export type TriggerImplParams<D extends TriggerDefinition> = {
@@ -243,10 +245,19 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
         this._telemetry.debug({ method: 'test', data: ctx.req.data });
         
         try {
-          const { values: test, params } = ctx.req.data;
+          const { values: test, params, itemIndex } = ctx.req.data;
           const output = await this.test(test, params);
-          
-          ctx.res.data = { events: output };
+          const total = output.length;
+
+          ctx.res.data = typeof itemIndex == 'number'
+            ? {
+                events: output[itemIndex] == undefined ? [] : [output[itemIndex]],
+                count: total,
+              }
+            : {
+                events: output,
+                count: total,
+              };
         } catch (err) {
           this._telemetry.error({ method: 'test', err });
           throw err;
