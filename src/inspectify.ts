@@ -23,8 +23,6 @@ export function inspectify(value: any, options?: InspectifyOptions): Serializabl
   });
 }
 
-const ERROR_KEYS: (keyof Error)[] = ['name', 'message', 'stack', 'cause'];
-
 type RecursiveParams = {
   value: any;
   seen: Set<object>;
@@ -96,8 +94,19 @@ function recursive(params: RecursiveParams): Serializable {
       const result: { [key: string]: Serializable } = {};
       
       if (value instanceof Error) {
-        for (const key of ERROR_KEYS) {
-          result[key] = dive(value[key]);
+        result['message'] = dive(value.message);
+
+        if (value.name && value.name != 'Error') {
+          result['name'] = dive(value.name);
+        }
+
+        const errorCode = (value as { code?: unknown }).code;
+        if (errorCode != null) {
+          result['code'] = dive(errorCode);
+        }
+
+        if (value.cause != null) {
+          result['cause'] = dive(value.cause);
         }
       }
       

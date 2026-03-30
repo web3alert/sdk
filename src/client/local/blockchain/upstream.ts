@@ -50,7 +50,9 @@ export class Upstream<S, B extends Backend> {
               this._telemetry.debug('starting backend');
               
               const backend = await use(async () => {
-                return await this._factory(this._name, this._spec);
+                return await this._factory(this._name, this._spec, {
+                  telemetry: this._telemetry,
+                });
               });
               
               this._telemetry.debug('subscribing to blocks');
