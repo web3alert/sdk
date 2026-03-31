@@ -110,7 +110,7 @@ function recursive(params: RecursiveParams): Serializable {
         }
       }
       
-      const keys = Object.keys(value);
+      const keys = Object.keys(value).filter((key) => key != 'stack');
       for (const key of keys.slice(0, maxEdges)) {
         result[key] = dive(value[key]);
       }

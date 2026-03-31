@@ -34,6 +34,8 @@ export type SequenceCallback = (index: number) => Promise<void>;
 export type SequencerOptions = {
   start: number;
   instanceTimeout: number;
+  concurrency: number;
+  maxMessages: number;
 };
 
 export type SequencerParams = {
@@ -72,6 +74,8 @@ export class Sequencer {
     this._options = defaults(options, {
       start: -1,
       instanceTimeout: 15_000,
+      concurrency: 10,
+      maxMessages: 200,
     });
     this._id = nanoid(4);
   }
@@ -89,7 +93,7 @@ export class Sequencer {
           name: `${this._name}.indexes`,
           options: {
             maxSize: 4 * 1024,
-            maxMessages: 200,
+            maxMessages: this._options.maxMessages,
           },
         });
         await stream.init();
@@ -106,7 +110,7 @@ export class Sequencer {
           callback: async message => {
             await this._callback(message.data.value);
           },
-          options: { concurrency: 10 },
+          options: { concurrency: this._options.concurrency },
         });
         await subscription.init();
         
