@@ -278,8 +278,10 @@ export class StreamSubscription<T> {
   
   private async _handleMessage(message: JsMsg): Promise<void> {
     await this._core.nothrow(async () => {
+      let data: T | undefined;
+
       try {
-        const data = this._core.decode(message.data) as T;
+        data = this._core.decode(message.data) as T;
         
         await this._callback({
           subject: message.subject,
@@ -296,7 +298,14 @@ export class StreamSubscription<T> {
       } catch (err) {
         this._core.warn(new Web3alertError('message handling failed', {
           cause: err,
-          details: { ref: this._ref, name: this._name },
+          details: {
+            ref: this._ref,
+            name: this._name,
+            subject: message.subject,
+            sequence: message.seq,
+            redeliveryCount: message.info.redeliveryCount,
+            data,
+          },
         }));
         
         const after = Math.min(1000 * Math.pow(2, message.info.redeliveryCount), 120_000);
