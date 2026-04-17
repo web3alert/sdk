@@ -49,11 +49,10 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://npm.pkg.github.com"
   },
   "dependencies": {
-    "@web3alert/types": "file:../types",
+    "@web3alert/types": "^4.0.0",
     "amqp-connection-manager": "^4.1.14",
     "amqplib": "^0.10.9",
     "chalk": "^4.1.2",
