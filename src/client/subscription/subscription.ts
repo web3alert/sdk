@@ -13,6 +13,7 @@ import {
   type TriggerRef,
   type TriggerSubscribeParams,
   type TriggerSubscribeResult,
+  type TriggerUnsubscribeParams,
 } from '../trigger';
 
 export type SubscriptionTestParams<T> = {
@@ -72,6 +73,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
     const callSubscribe = async () => {
       return await this._core.call<SP, SR>(subscribeMethod, {
         params: this._params,
+        subscriber: this._name,
       });
     };
     
@@ -196,6 +198,22 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
     await this._timer.destroy();
     if (this._restore) {
       await this._restore;
+    }
+    if (this._subscriptionKey) {
+      try {
+        await this._core.call<TriggerUnsubscribeParams, void>(`trigger.${this._trigger.name}.api.unsubscribe`, {
+          key: this._subscriptionKey,
+          subscriber: this._name,
+        });
+      } catch (err) {
+        this._telemetry.warn({
+          err,
+          trigger: this._trigger.name,
+          subscription: this._name,
+          key: this._subscriptionKey,
+        }, 'failed to unsubscribe runtime trigger task');
+      }
+      this._subscriptionKey = undefined;
     }
     if (this._subscription) {
       await this._subscription.destroy();

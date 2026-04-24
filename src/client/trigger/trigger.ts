@@ -24,6 +24,7 @@ import {
 export type TriggerTask<P> = {
   timestamp: string;
   params: P;
+  subscribers?: Record<string, string>;
 };
 
 export type TriggerState = {
@@ -32,11 +33,17 @@ export type TriggerState = {
 
 export type TriggerSubscribeParams<P> = {
   params: P;
+  subscriber?: string;
 };
 
 export type TriggerSubscribeResult = {
   stream: StreamRef;
   key: string | undefined;
+};
+
+export type TriggerUnsubscribeParams = {
+  key: string;
+  subscriber?: string;
 };
 
 export type TriggerTestParams<P, T> = {
@@ -191,6 +198,26 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
               if (!task) {
                 continue;
               }
+
+              if (task.subscribers) {
+                const subscribers = Object.fromEntries(
+                  Object.entries(task.subscribers)
+                    .filter(([, timestamp]) => now - new Date(timestamp).getTime() < timeout),
+                );
+
+                if (Object.keys(subscribers).length == 0) {
+                  this._telemetry.debug({ key: fixedKey }, 'task evicted by hearbeat timeout');
+                  await this._tasks.delete(fixedKey);
+                } else if (Object.keys(subscribers).length != Object.keys(task.subscribers).length) {
+                  await this._tasks.put(fixedKey, {
+                    ...task,
+                    subscribers,
+                    timestamp: Object.values(subscribers).sort().at(-1) ?? task.timestamp,
+                  });
+                }
+
+                continue;
+              }
               
               const lastOnlineAt = new Date(task.timestamp).getTime();
               
@@ -220,14 +247,22 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
       type SR = TriggerSubscribeResult;
       await this._service.method<SP, SR>('subscribe', async ctx => {
         try {
-          const { params } = ctx.req.data;
+          const { params, subscriber } = ctx.req.data;
           
           const now = new Date();
+          const timestamp = now.toISOString();
           const key = hashOf(params);
+          const subscriberKey = subscriber ?? 'default';
           
-          await this._tasks.put(key, {
-            timestamp: now.toISOString(),
-            params,
+          await this._tasks.mutate(key, async (prev, write) => {
+            await write({
+              timestamp,
+              params,
+              subscribers: {
+                ...(prev?.subscribers ?? {}),
+                [subscriberKey]: timestamp,
+              },
+            });
           });
 
           await this._syncTasksActiveState();
@@ -235,6 +270,40 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           ctx.res.data = { stream: this._stream.ref, key };
         } catch (err) {
           this._telemetry.error({ method: 'subscribe', err });
+          throw err;
+        }
+      });
+
+      await this._service.method<TriggerUnsubscribeParams, void>('unsubscribe', async ctx => {
+        try {
+          const { key, subscriber } = ctx.req.data;
+          const task = await this._tasks.get(key);
+          if (!task) {
+            return;
+          }
+
+          if (!subscriber || !task.subscribers) {
+            await this._tasks.delete(key);
+            await this._syncTasksActiveState();
+            return;
+          }
+
+          const subscribers = { ...task.subscribers };
+          delete subscribers[subscriber];
+
+          if (Object.keys(subscribers).length == 0) {
+            await this._tasks.delete(key);
+          } else {
+            await this._tasks.put(key, {
+              ...task,
+              subscribers,
+              timestamp: Object.values(subscribers).sort().at(-1) ?? task.timestamp,
+            });
+          }
+
+          await this._syncTasksActiveState();
+        } catch (err) {
+          this._telemetry.error({ method: 'unsubscribe', err });
           throw err;
         }
       });
