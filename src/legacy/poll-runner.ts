@@ -1,8 +1,5 @@
-import {
-  type Bundle,
-  type SubscriptionObjectRaw,
-} from '@web3alert/types';
-import { type Event } from './types';
+import { type SubscriptionObjectRaw } from '@web3alert/types';
+import { type Bundle, type Event } from './types';
 import { type System } from './system';
 
 export type HandleContext = {

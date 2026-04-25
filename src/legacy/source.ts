@@ -1,8 +1,9 @@
 import {
   type Bundle,
   type CustomBundleRequest,
-} from '@web3alert/types';
-import { type SourceAnnounce, type Event } from './types';
+  type SourceAnnounce,
+  type Event,
+} from './types';
 
 export type Issue = {
   message: string;

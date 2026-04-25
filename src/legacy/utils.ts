@@ -13,7 +13,7 @@ export type EventReference = {
 };
 
 export function getEventReference(rule: SubscriptionRuleRaw): EventReference {
-  const parts = rule.event.split('.');
+  const parts = rule.trigger.split('.');
   
   return {
     name: parts.slice(2).join('.'),
@@ -33,9 +33,9 @@ export function getUniqEvents(
   
   for (const subscription of subscriptions) {
     for (const rule of subscription.rules) {
-      if (rule.event.startsWith(prefix)) {
-        if (!events.has(rule.event)) {
-          events.set(rule.event, getEventReference(rule));
+      if (rule.trigger.startsWith(prefix)) {
+        if (!events.has(rule.trigger)) {
+          events.set(rule.trigger, getEventReference(rule));
         }
       }
     }

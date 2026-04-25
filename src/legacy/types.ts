@@ -22,6 +22,19 @@ export type EventV2 = {
   links?: EventV2Link[];
 };
 
+export type Bundle = {
+  name: string;
+  version?: string;
+  types?: Record<string, unknown>;
+  events?: unknown[];
+  force?: boolean;
+};
+
+export type CustomBundleRequest = {
+  name: string;
+  [key: string]: unknown;
+};
+
 export type EventV2Link = {
   title: string;
   url: string;
