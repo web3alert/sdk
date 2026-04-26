@@ -1,6 +1,6 @@
 {
   "name": "@web3alert/sdk",
-  "version": "2.2.8",
+  "version": "2.2.9",
   "description": "TypeScript SDK for building distributed microservices and event-driven applications on NATS",
   "author": "Web3alert Team <info@web3alert.io>",
   "license": "MIT",
