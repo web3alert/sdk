@@ -52,7 +52,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@web3alert/types": "^5.0.1",
+    "@web3alert/types": "^6.0.0",
     "amqp-connection-manager": "^4.1.14",
     "amqplib": "^0.10.9",
     "chalk": "^4.1.2",
