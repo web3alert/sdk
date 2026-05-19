@@ -1,6 +1,7 @@
 import { type KV, StorageType } from 'nats';
 import { Autodestructible } from './autodestructible';
 import { type Core } from './core';
+import { isWrongLastSequenceError, retry } from './utils';
 import { type WatcherCallback, Watcher } from './watcher';
 
 export type BucketMutateCallback<T, R> = (
@@ -128,26 +129,35 @@ export class Bucket<T> extends Autodestructible {
     key: string,
     callback: BucketMutateCallback<T, R>,
   ): Promise<R> {
-    const entry = await this._kv.get(key);
-    
-    if (entry) {
-      const prev = (entry.operation == 'PUT' && entry.value.length > 0)
-        ? this._core.decode(entry.value) as T
-        : undefined
-      ;
+    return await retry(async () => {
+      const entry = await this._kv.get(key);
       
-      return await callback(prev, async next => {
-        await this._kv.update(key, this._core.encode(next), entry.revision);
+      if (entry) {
+        const prev = (entry.operation == 'PUT' && entry.value.length > 0)
+          ? this._core.decode(entry.value) as T
+          : undefined
+        ;
         
-        return next;
-      });
-    } else {
-      return await callback(undefined, async next => {
-        await this._kv.create(key, this._core.encode(next));
-        
-        return next;
-      });
-    }
+        return await callback(prev, async next => {
+          await this._kv.update(key, this._core.encode(next), entry.revision);
+
+          return next;
+        });
+      } else {
+        return await callback(undefined, async next => {
+          await this._kv.create(key, this._core.encode(next));
+
+          return next;
+        });
+      }
+    }, {
+      when: isWrongLastSequenceError,
+      retries: 5,
+      minDelay: 10,
+      maxDelay: 250,
+      factor: 2,
+      jitter: 0.3,
+    });
   }
   
   public async keys(filter?: string): Promise<string[]> {
