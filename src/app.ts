@@ -39,6 +39,7 @@ export class App {
   
   public async destroy(): Promise<void> {
     await this._container.destroy();
+    await this._core.destroy();
   }
   
   public async client(

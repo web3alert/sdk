@@ -170,7 +170,9 @@ export class Registry {
         context[tokenName] = instance;
       }
       
-      const instance = await prefab.factory(context, prefab.config);
+      const instance = await container.use(async () => {
+        return await prefab.factory(context, prefab.config);
+      });
       
       instances.set(name, instance);
       stack.delete(name);
