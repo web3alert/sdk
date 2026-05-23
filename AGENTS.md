@@ -15,11 +15,15 @@ refactor(core): simplify validation logic
 Allowed types:
 - feat - new functionality
 - fix - bug fixes
+- perf - performance improvements
 - refactor - code changes without behavior change
 - docs - documentation updates
 - style - formatting, no logic changes
 - test - adding or updating tests
 - chore - maintenance, dependencies, tooling
+- ci - CI workflow changes
+- build - build system or packaging changes
+- revert - revert a previous change
 
 Notes:
 - Use imperative mood (e.g., "add", not "added")
