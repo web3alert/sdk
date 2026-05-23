@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - marketplace
+      - master
     paths:
       - src/**
       - package.json
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.ref_name == 'marketplace'
+    if: github.ref_name == 'master'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
