@@ -113,10 +113,6 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           telemetry: this._telemetry.child('events', { labels: { trigger: this._name } }),
           core: this._core,
           name: `trigger.${this._name}.events`,
-          options: {
-            maxSize: 10 * 1024 * 1024,
-            maxMessages: 100,
-          },
         });
         await stream.init();
         

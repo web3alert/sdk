@@ -32,6 +32,7 @@ export type StreamOptions = {
   maxSize: number;
   maxMessages: number;
   maxMessageSize: number;
+  discardPolicy: DiscardPolicy;
 };
 
 export type StreamParams = {
@@ -48,9 +49,9 @@ export class Stream<T> {
   private _options: StreamOptions;
   private _info!: StreamInfo;
   private _ref!: StreamRef;
-  
+
   private _gaugeLastPublishedSeq: Gauge;
-  
+
   constructor(params: StreamParams) {
     const {
       telemetry,
@@ -58,7 +59,7 @@ export class Stream<T> {
       name,
       options,
     } = params;
-    
+
     this._telemetry = telemetry;
     this._core = core;
     this._name = name;
@@ -67,38 +68,57 @@ export class Stream<T> {
       maxSize: 100 * 1024 * 1024, // 100 MB
       maxMessages: 100_000,
       maxMessageSize: 100 * 1024, // 100 KB
+      discardPolicy: DiscardPolicy.New,
     }));
-    
+
     this._gaugeLastPublishedSeq = this._telemetry.gauge({
       name: 'stream_last_published_seq',
       help: 'Last published sequence',
       labelNames: ['stream', 'subject'],
     });
-    
+
     this.init = this._telemetry.wrap('init', this.init);
     this.destroy = this._telemetry.wrap('destroy', this.destroy);
   }
-  
+
   private async _publish(
     rawSubject: string,
     data: T,
     options?: Partial<StreamPublishOptions>,
   ): Promise<void> {
     this._telemetry.trace({ subject: rawSubject, data }, 'publish');
-    
+
     const publishOptions = prepareStreamPublishOptions(options);
-    
-    const ack = await this._core.js.publish(rawSubject, this._core.encode(data), publishOptions);
-    
+
+    let ack;
+    try {
+      ack = await this._core.js.publish(rawSubject, this._core.encode(data), publishOptions);
+    } catch (err) {
+      this._telemetry.error({
+        err,
+        stream: this._info.config.name,
+        subject: rawSubject,
+        discardPolicy: this._options.discardPolicy,
+        limits: {
+          maxAge: this._options.maxAge,
+          maxSize: this._options.maxSize,
+          maxMessages: this._options.maxMessages,
+          maxMessageSize: this._options.maxMessageSize,
+        },
+      }, isJetStreamLimitError(err) ? 'stream publish rejected by limits' : 'stream publish failed');
+
+      throw err;
+    }
+
     this._gaugeLastPublishedSeq.set({
       stream: this._info.config.name,
     }, ack.seq);
   }
-  
+
   public async init(): Promise<void> {
     const name = this._name.replaceAll('.', '_');
     const subject = this._name;
-    
+
     try {
       this._info = await this._core.jsm.streams.add({
         name,
@@ -109,7 +129,7 @@ export class Stream<T> {
         max_age: this._options.maxAge * 1_000_000,
         max_bytes: this._options.maxSize,
         max_msg_size: this._options.maxMessageSize,
-        discard: DiscardPolicy.Old,
+        discard: this._options.discardPolicy,
         num_replicas: this._core.replicas,
       });
     } catch (err) {
@@ -120,29 +140,30 @@ export class Stream<T> {
           max_age: this._options.maxAge * 1_000_000,
           max_bytes: this._options.maxSize,
           max_msg_size: this._options.maxMessageSize,
+          discard: this._options.discardPolicy,
         });
       } else {
         throw err;
       }
     }
-    
+
     this._ref = {
       stream: this._info.config.name,
       subject,
     };
   }
-  
+
   public async destroy(): Promise<void> {
     this._telemetry.destroy();
   }
-  
+
   public async publish(
     data: T,
     options?: Partial<StreamPublishOptions>,
   ): Promise<void> {
     await this._publish(this._ref.subject, data, options);
   }
-  
+
   public async publishToSubject(
     subject: string,
     data: T,
@@ -150,11 +171,11 @@ export class Stream<T> {
   ): Promise<void> {
     await this._publish(`${this._ref.subject}.${subject}`, data, options);
   }
-  
+
   public get ref(): StreamRef {
     return this._ref;
   }
-  
+
   public get info(): StreamInfo {
     return this._info;
   }
@@ -187,9 +208,9 @@ function isMissingJetStreamResourceError(err: unknown): boolean {
   if (!(err instanceof NatsError)) {
     return false;
   }
-  
+
   const description = err.api_error?.description ?? err.message;
-  
+
   return (
     (
       err.code == '404'
@@ -211,17 +232,34 @@ function isJetStreamResourceStoppedError(err: unknown): boolean {
   if (isMissingJetStreamResourceError(err)) {
     return true;
   }
-  
+
   if (!(err instanceof NatsError)) {
     return false;
   }
-  
+
   const description = err.api_error?.description ?? err.message;
-  
+
   return (
     err.code == '409'
     && (
       description == 'consumer deleted'
+    )
+  );
+}
+
+function isJetStreamLimitError(err: unknown): boolean {
+  if (!(err instanceof NatsError)) {
+    return false;
+  }
+
+  const description = err.api_error?.description ?? err.message;
+
+  return (
+    err.code == '503'
+    && (
+      description.includes('maximum')
+      || description.includes('exceeded')
+      || description.includes('limit')
     )
   );
 }
@@ -241,9 +279,9 @@ export class StreamSubscription<T> {
   private _queue!: fastq.queueAsPromised<JsMsg, void>;
   private _loop!: Promise<void>;
   private _loopError?: unknown;
-  
+
   private _gaugeLastConsumedSeq: Gauge;
-  
+
   constructor(params: StreamSubscriptionParams<T>) {
     const {
       telemetry,
@@ -253,9 +291,9 @@ export class StreamSubscription<T> {
       callback,
       options,
     } = params;
-    
+
     this._handleMessage = this._handleMessage.bind(this);
-    
+
     this._telemetry = telemetry;
     this._core = core;
     this._name = name;
@@ -264,33 +302,33 @@ export class StreamSubscription<T> {
     this._filter = options?.filter;
     this._concurrency = options?.concurrency ?? 1;
     this._error = options?.error;
-    
+
     this._gaugeLastConsumedSeq = this._telemetry.gauge({
       name: 'stream_last_consumed_seq',
       help: 'Last consumed sequence',
       labelNames: ['stream', 'consumer', 'subject'],
     });
-    
+
     this.init = this._telemetry.wrap('init', this.init);
     this.destroy = this._telemetry.wrap('destroy', this.destroy);
     this._handleMessage = this._telemetry.wrap('_handleMessage', this._handleMessage);
   }
-  
+
   private async _handleMessage(message: JsMsg): Promise<void> {
     await this._core.nothrow(async () => {
       let data: T | undefined;
 
       try {
         data = this._core.decode(message.data) as T;
-        
+
         await this._callback({
           subject: message.subject,
           header: (message.headers) ? fromHeaders(message.headers) : {},
           data,
         });
-        
+
         message.ack();
-        
+
         this._gaugeLastConsumedSeq.set({
           stream: this._info.stream_name,
           consumer: this._info.name,
@@ -307,18 +345,18 @@ export class StreamSubscription<T> {
             data,
           },
         }));
-        
+
         const after = Math.min(1000 * Math.pow(2, message.info.redeliveryCount), 120_000);
-        
+
         message.nak(after);
       }
     }, { ref: this._ref, name: this._name, handler: 'messages' });
   }
-  
+
   public async init(): Promise<void> {
     await setup(async use => {
       const name = this._name.replaceAll('.', '_');
-      
+
       const info = await this._core.jsm.consumers.add(this._ref.stream, {
         ack_policy: AckPolicy.Explicit,
         deliver_policy: DeliverPolicy.New,
@@ -326,13 +364,13 @@ export class StreamSubscription<T> {
         filter_subject: (this._filter) ? `${this._ref.subject}.${this._filter}` : undefined,
       });
       this._info = info;
-      
+
       this._consumer = await this._core.js.consumers.get(info.stream_name, info.name);
       this._terminator = new AbortController();
       this._queue = fastq.promise(this._handleMessage, this._concurrency);
       this._loop = this._consume().catch(async err => {
         this._loopError = err;
-        
+
         if (this._terminator.signal.aborted) {
           this._telemetry.warn({
             err,
@@ -341,7 +379,7 @@ export class StreamSubscription<T> {
           }, 'stream subscription stopped while underlying jetstream resource was removed');
           return;
         }
-        
+
         if (this._error) {
           try {
             await this._error(err);
@@ -353,29 +391,29 @@ export class StreamSubscription<T> {
             }));
           }
         }
-        
+
         this._core.uncaughtException(err);
       });
     });
   }
-  
+
   public async destroy(): Promise<void> {
     this._terminator?.abort();
-    
+
     await this._loop;
-    
+
     if (this._queue) {
       await this._queue.drained();
     }
-    
+
     this._telemetry.destroy();
   }
-  
+
   private async _consume(): Promise<void> {
     while (!this._terminator.signal.aborted) {
       let messages;
       let messagesClosed: Promise<void | Error> | undefined;
-      
+
       try {
         messages = await this._consumer.fetch({ max_messages: 20 });
         messagesClosed = messages.closed().catch(err => err as Error);
@@ -386,15 +424,15 @@ export class StreamSubscription<T> {
             ref: this._ref,
             name: this._name,
           }, 'stream subscription stopped while underlying jetstream resource was removed');
-          
+
           return;
         }
-        
+
         throw err;
       }
-      
+
       let streamErr: unknown;
-      
+
       try {
         for await (const message of messages) {
           this._queue.push(message);
@@ -402,10 +440,10 @@ export class StreamSubscription<T> {
       } catch (err) {
         streamErr = err;
       }
-      
+
       const closedErr = await messagesClosed;
       const err = streamErr ?? closedErr;
-      
+
       if (err) {
         if (this._terminator.signal.aborted) {
           this._telemetry.warn({
@@ -413,17 +451,17 @@ export class StreamSubscription<T> {
             ref: this._ref,
             name: this._name,
           }, 'stream subscription stopped while underlying jetstream resource was removed');
-          
+
           return;
         }
-        
+
         throw err;
       }
-      
+
       await this._queue.drained();
     }
   }
-  
+
   public get info(): ConsumerInfo {
     return this._info;
   }
@@ -448,10 +486,10 @@ export class StreamPipe<T> {
   private _name: string;
   private _callback: StreamSubscriptionCallback<T>;
   private _options: StreamPipeOptions;
-  
+
   public stream!: Stream<T>;
   public subscription!: StreamSubscription<T>;
-  
+
   constructor(params: StreamPipeParams<T>) {
     const {
       telemetry,
@@ -460,17 +498,17 @@ export class StreamPipe<T> {
       callback,
       options,
     } = params;
-    
+
     this._telemetry = telemetry;
     this._core = core;
     this._name = name;
     this._callback = callback;
     this._options = defaults(options, {});
-    
+
     this.init = this._telemetry.wrap('init', this.init);
     this.destroy = this._telemetry.wrap('destroy', this.destroy);
   }
-  
+
   public async init(): Promise<void> {
     await setup(async use => {
       this.stream = await use(async () => {
@@ -481,10 +519,10 @@ export class StreamPipe<T> {
           options: this._options.stream,
         });
         await stream.init();
-        
+
         return stream;
       });
-      
+
       this.subscription = await use(async () => {
         const subscription = new StreamSubscription({
           telemetry: this._telemetry.child('subscription'),
@@ -495,18 +533,18 @@ export class StreamPipe<T> {
           options: this._options.subscription,
         });
         await subscription.init();
-        
+
         return subscription;
       });
     });
   }
-  
+
   public async destroy(): Promise<void> {
     await this.subscription.destroy();
     await this.stream.destroy();
     this._telemetry.destroy();
   }
-  
+
   public async publish(
     data: T,
     options?: Partial<StreamPublishOptions>,
@@ -521,24 +559,24 @@ export function prepareStreamPublishOptions(
   if (!options) {
     return undefined;
   }
-  
+
   const result: Partial<JetStreamPublishOptions> = {};
   let something = false;
-  
+
   if (options.id) {
     result.msgID = options.id;
     something = true;
   }
-  
+
   if (options.headers) {
     result.headers = toHeaders(options.headers);
     something = true;
   }
-  
+
   if (something) {
     return result;
   }
-  
+
   return undefined;
 }
 

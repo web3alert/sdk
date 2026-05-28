@@ -193,7 +193,7 @@ export class Core {
       max_age: 2 * 60 * 60 * 1000 * 1000 * 1000, // 2 hours in nanoseconds
       max_bytes: 100 * 1024 * 1024, // 100 MB
       max_msg_size: 100 * 1024, // 100 KB
-      discard: DiscardPolicy.Old,
+      discard: DiscardPolicy.New,
       // num_replicas: 3,
     });
     
