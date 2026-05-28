@@ -80,10 +80,8 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
     const attachStream = async (subscribeResult: TriggerSubscribeResult): Promise<void> => {
       const { stream, key } = subscribeResult;
       const subscriptionName = (key) ? `${this._name}.${key}` : this._name;
-      
-      this._subscriptionKey = key;
-      this._subscriptionBroken = false;
-      this._subscription = await this._core.stream.subscribe<InferTriggerOutput<D>>(
+
+      const subscription = await this._core.stream.subscribe<InferTriggerOutput<D>>(
         this._telemetry.child('events', {
           labels: {
             trigger: this._trigger.name,
@@ -113,6 +111,10 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
           },
         },
       );
+
+      this._subscriptionKey = key;
+      this._subscription = subscription;
+      this._subscriptionBroken = false;
     };
     
     const restoreStream = async (reason: string): Promise<void> => {
@@ -148,6 +150,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
             key: this._subscriptionKey,
           }, 'runtime stream subscription restored');
         } catch (err) {
+          this._subscriptionBroken = true;
           this._telemetry.error({
             err,
             trigger: this._trigger.name,
