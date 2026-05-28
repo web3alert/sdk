@@ -37,3 +37,7 @@ This repository depends on `@web3alert/types`.
 - Before pushing changes, check whether sibling `types` contains relevant public type changes that this SDK should consume.
 - If `@web3alert/types` changed, wait until the new `@web3alert/types` version is published to npm, then update this repository's dependency and lockfile before committing and pushing SDK changes.
 - After each `@web3alert/types` update, SDK should be updated and pushed so a new `@web3alert/sdk` version can be published for downstream repositories.
+
+## Versioning
+
+Do not manually change `package.json` or lockfile package versions before committing or pushing. The automatic publisher updates the package version from the committed changes.
