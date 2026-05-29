@@ -1,7 +1,7 @@
 import { type Telemetry } from '../../types';
 import { type Core } from '../../core';
 import { type Timer } from '../../timer';
-import { type StreamSubscription } from '../../stream';
+import { type StreamSubscription, type StreamSubscriptionOptions } from '../../stream';
 import { type Service } from '../../service';
 import { type EventCallback } from '../types';
 import { type SubscriptionRef } from './types';
@@ -29,7 +29,16 @@ export type SubscriptionImplParams<D extends TriggerDefinition> = {
   trigger: TriggerRef<D>;
   params: InferTriggerParams<D>;
   callback: EventCallback<InferTriggerOutput<D>>;
+  options?: Pick<Partial<StreamSubscriptionOptions>, 'concurrency'>;
 };
+
+function normalizeSubscriptionConcurrency(value: number | undefined): number {
+  if (value == undefined || !Number.isFinite(value)) {
+    return 10;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), 1), 64);
+}
 
 export class SubscriptionImpl<D extends TriggerDefinition> {
   private _telemetry: Telemetry;
@@ -38,6 +47,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
   private _trigger: TriggerRef<D>;
   private _params: InferTriggerParams<D>;
   private _callback: EventCallback<InferTriggerOutput<D>>;
+  private _options: Pick<Partial<StreamSubscriptionOptions>, 'concurrency'>;
   private _subscription!: StreamSubscription<InferTriggerOutput<D>>;
   private _timer!: Timer;
   private _service!: Service;
@@ -54,6 +64,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
       trigger,
       params: subscriptionParams,
       callback,
+      options,
     } = params;
     
     this._telemetry = telemetry;
@@ -62,6 +73,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
     this._trigger = trigger;
     this._params = subscriptionParams;
     this._callback = callback;
+    this._options = options ?? {};
     this._subscriptionBroken = false;
     this._destroying = false;
   }
@@ -95,7 +107,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
         },
         {
           filter: key,
-          concurrency: 10,
+          concurrency: normalizeSubscriptionConcurrency(this._options.concurrency),
           error: err => {
             if (this._destroying) {
               return;

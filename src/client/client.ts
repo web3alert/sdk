@@ -1,6 +1,7 @@
 import { type BaseClientStackParams, BaseClientStack } from './base-client';
 import { Namespace } from '../namespace';
 import { type ActionInput, type EventCallback } from './types';
+import { type StreamSubscriptionOptions } from '../stream';
 import { ClientLocal } from './local';
 import { Refs } from './refs';
 import { type SequenceCallback, type SequencerOptions, Sequencer } from './sequencer';
@@ -35,11 +36,14 @@ export type ClientTriggerParams<D extends TriggerDefinition> = {
   hooks?: TriggerLifecycleHooks;
 };
 
+export type ClientSubscribeOptions = Pick<Partial<StreamSubscriptionOptions>, 'concurrency'>;
+
 export type ClientSubscribeParams<D extends TriggerDefinition> = {
   name: string;
   trigger: TriggerRef<D>;
   params?: InferTriggerParams<D>;
   callback: EventCallback<InferTriggerOutput<D>>;
+  options?: ClientSubscribeOptions;
 };
 
 export type ClientCronParams = {
@@ -196,6 +200,7 @@ export class Client extends BaseClientStack {
       trigger,
       params: subscriptionParams,
       callback,
+      options,
     } = params;
     
     return this._use(async () => {
@@ -206,6 +211,7 @@ export class Client extends BaseClientStack {
         trigger,
         params: subscriptionParams,
         callback,
+        options,
       });
       await subscription.init();
       
