@@ -414,6 +414,16 @@ export class StreamSubscription<T> {
       await this._queue.drained();
     }
 
+    if (this._info) {
+      try {
+        await this._core.jsm.consumers.delete(this._info.stream_name, this._info.name);
+      } catch (err) {
+        if (!isMissingJetStreamResourceError(err)) {
+          throw err;
+        }
+      }
+    }
+
     this._telemetry.destroy();
   }
 
