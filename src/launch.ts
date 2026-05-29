@@ -53,22 +53,30 @@ export async function launch(main: LaunchMain, params: LaunchParams): Promise<vo
   
   try {
     const app = await main();
+    let resolveShutdown: () => void;
+    const shutdownComplete = new Promise<void>(resolve => {
+      resolveShutdown = resolve;
+    });
     
     await app.init();
+    const keepAlive = setInterval(() => undefined, 60_000);
     
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
     
     log.info('online');
+    await shutdownComplete;
     
     async function shutdown(): Promise<void> {
       process.removeListener('SIGINT', shutdown);
       process.removeListener('SIGTERM', shutdown);
       
       try {
+        clearInterval(keepAlive);
         await app.destroy();
         
         log.info('offline');
+        resolveShutdown();
       } catch (err) {
         fatal(err as Error, 'shutdown failed');
       }

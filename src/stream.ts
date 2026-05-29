@@ -247,6 +247,14 @@ function isJetStreamResourceStoppedError(err: unknown): boolean {
   );
 }
 
+function isJetStreamFetchTimeout(err: unknown): boolean {
+  if (!(err instanceof NatsError)) {
+    return false;
+  }
+
+  return err.code == '408' || err.message.toLowerCase().includes('timeout');
+}
+
 function isJetStreamLimitError(err: unknown): boolean {
   if (!(err instanceof NatsError)) {
     return false;
@@ -415,7 +423,10 @@ export class StreamSubscription<T> {
       let messagesClosed: Promise<void | Error> | undefined;
 
       try {
-        messages = await this._consumer.fetch({ max_messages: 20 });
+        messages = await this._consumer.fetch({
+          max_messages: 20,
+          expires: 1_000,
+        });
         messagesClosed = messages.closed().catch(err => err as Error);
       } catch (err) {
         if (this._terminator.signal.aborted) {
@@ -444,7 +455,7 @@ export class StreamSubscription<T> {
       const closedErr = await messagesClosed;
       const err = streamErr ?? closedErr;
 
-      if (err) {
+      if (err && !isJetStreamFetchTimeout(err)) {
         if (this._terminator.signal.aborted) {
           this._telemetry.warn({
             err,
