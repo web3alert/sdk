@@ -1,6 +1,7 @@
 import {
   type Codec,
   type NatsConnection,
+  type Msg,
   type JetStreamClient,
   type JetStreamManager,
   type StreamInfo,
@@ -254,32 +255,44 @@ export class Core {
   
   public async call<P, R>(method: string, params: P, options?: CoreCallOptions): Promise<R> {
     this.telemetry.trace({ method }, 'call');
-    
+
+    let message: Msg;
     try {
-      const message = await this.nats.request(method, this.encode(params), {
+      message = await this.nats.request(method, this.encode(params), {
         timeout: options?.timeoutMs ?? 5000,
       });
-      const response = this.decode(message.data);
-      
-      if (response && typeof response == 'object') {
-        if ('result' in response) {
-          return response.result as R;
-        }
-        
-        if ('error' in response) {
-          throw deserializeError(response.error);
-        }
-        
-        return undefined as R;
-      }
-      
-      throw new Error('invalid response');
     } catch (err) {
       throw new Web3alertError('request error', {
         cause: err,
         details: { method },
       });
     }
+
+    let response: unknown;
+    try {
+      response = this.decode(message.data);
+    } catch (err) {
+      throw new Web3alertError('invalid response', {
+        cause: err,
+        details: { method },
+      });
+    }
+
+    if (response && typeof response == 'object') {
+      if ('result' in response) {
+        return response.result as R;
+      }
+
+      if ('error' in response) {
+        throw deserializeError(response.error);
+      }
+
+      return undefined as R;
+    }
+
+    throw new Web3alertError('invalid response', {
+      details: { method },
+    });
   }
   
   public async service(name: string): Promise<Service> {
