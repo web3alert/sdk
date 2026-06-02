@@ -278,7 +278,13 @@ export function createTracingConsoleBackend(stream: Stream): Backend {
       ;
       
       let m = msg && chalk.cyan(msg);
-      let d = details && util.inspect(details, { depth: 20, colors: true });
+      let d = details && util.inspect(details, {
+        depth: 6,
+        colors: true,
+        maxArrayLength: 25,
+        maxStringLength: 1_000,
+        breakLength: 160,
+      });
       let s = join(m, d);
       
       if (!s) {

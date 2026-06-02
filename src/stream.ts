@@ -86,7 +86,7 @@ export class Stream<T> {
     data: T,
     options?: Partial<StreamPublishOptions>,
   ): Promise<void> {
-    this._telemetry.trace({ subject: rawSubject, data }, 'publish');
+    this._telemetry.trace({ subject: rawSubject, data: summarizeStreamPayload(data) }, 'publish');
 
     const publishOptions = prepareStreamPublishOptions(options);
 
@@ -192,6 +192,7 @@ export type StreamSubscriptionCallback<T> = (message: StreamMessage<T>) => Promi
 export type StreamSubscriptionOptions = {
   filter: string;
   concurrency: number;
+  batchSize: number;
   error: ErrorCallback;
 };
 
@@ -203,6 +204,18 @@ export type StreamSubscriptionParams<T> = {
   callback: StreamSubscriptionCallback<T>;
   options?: Partial<StreamSubscriptionOptions>;
 };
+
+function normalizeStreamSubscriptionBatchSize(value: number | undefined, concurrency: number): number {
+  if (value == undefined || !Number.isFinite(value)) {
+    return Math.min(Math.max(concurrency * 8, 100), 1000);
+  }
+
+  return Math.min(Math.max(Math.trunc(value), 1), 1000);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function isMissingJetStreamResourceError(err: unknown): boolean {
   if (!(err instanceof NatsError)) {
@@ -272,6 +285,56 @@ function isJetStreamLimitError(err: unknown): boolean {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value == 'object' && value != null && !Array.isArray(value);
+}
+
+function summarizeStreamPayload(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return {
+      type: 'array',
+      length: value.length,
+    };
+  }
+
+  if (!isRecord(value)) {
+    return {
+      type: typeof value,
+    };
+  }
+
+  const data = isRecord(value['data']) ? value['data'] : value;
+  const payload = isRecord(value['payload']) ? value['payload'] : undefined;
+  const system = isRecord(payload?.['__system']) ? payload['__system'] : undefined;
+  const runtime = isRecord(payload?.['__runtime']) ? payload['__runtime'] : undefined;
+
+  return {
+    type: 'object',
+    keys: Object.keys(value).slice(0, 20),
+    ...(typeof value['name'] == 'string' ? { name: value['name'] } : {}),
+    ...(typeof value['title'] == 'string' ? { title: value['title'] } : {}),
+    ...(typeof data['block'] == 'number' || typeof data['block'] == 'string' ? { block: data['block'] } : {}),
+    ...(typeof data['index'] == 'number' || typeof data['index'] == 'string' ? { index: data['index'] } : {}),
+    ...(typeof data['hash'] == 'string' ? { hash: data['hash'] } : {}),
+    ...(typeof data['transactionHash'] == 'string' ? { transactionHash: data['transactionHash'] } : {}),
+    ...(system ? {
+      system: {
+        ...(typeof system['block'] == 'number' ? { block: system['block'] } : {}),
+        ...(typeof system['itemIndex'] == 'number' ? { itemIndex: system['itemIndex'] } : {}),
+        ...(typeof system['transactionHash'] == 'string' ? { transactionHash: system['transactionHash'] } : {}),
+      },
+    } : {}),
+    ...(runtime ? {
+      runtime: {
+        ...(typeof runtime['revision'] == 'number' ? { revision: runtime['revision'] } : {}),
+        ...(typeof runtime['durationMs'] == 'number' ? { durationMs: runtime['durationMs'] } : {}),
+        ...(typeof runtime['outputIndex'] == 'number' ? { outputIndex: runtime['outputIndex'] } : {}),
+        ...(typeof runtime['outputCount'] == 'number' ? { outputCount: runtime['outputCount'] } : {}),
+      },
+    } : {}),
+  };
+}
+
 export class StreamSubscription<T> {
   private _telemetry: Telemetry;
   private _core: Core;
@@ -280,6 +343,7 @@ export class StreamSubscription<T> {
   private _callback: StreamSubscriptionCallback<T>;
   private _filter?: string;
   private _concurrency: number;
+  private _batchSize: number;
   private _error?: ErrorCallback;
   private _info!: ConsumerInfo;
   private _consumer!: Consumer;
@@ -309,6 +373,7 @@ export class StreamSubscription<T> {
     this._callback = callback;
     this._filter = options?.filter;
     this._concurrency = options?.concurrency ?? 1;
+    this._batchSize = normalizeStreamSubscriptionBatchSize(options?.batchSize, this._concurrency);
     this._error = options?.error;
 
     this._gaugeLastConsumedSeq = this._telemetry.gauge({
@@ -350,7 +415,7 @@ export class StreamSubscription<T> {
             subject: message.subject,
             sequence: message.seq,
             redeliveryCount: message.info.redeliveryCount,
-            data,
+            data: summarizeStreamPayload(data),
           },
         }));
 
@@ -429,12 +494,19 @@ export class StreamSubscription<T> {
 
   private async _consume(): Promise<void> {
     while (!this._terminator.signal.aborted) {
+      await this._waitForQueueCapacity();
+
+      if (this._terminator.signal.aborted) {
+        return;
+      }
+
+      const maxMessages = this._nextFetchMessageCount();
       let messages;
       let messagesClosed: Promise<void | Error> | undefined;
 
       try {
         messages = await this._consumer.fetch({
-          max_messages: 20,
+          max_messages: maxMessages,
           expires: 1_000,
         });
         messagesClosed = messages.closed().catch(err => err as Error);
@@ -456,7 +528,13 @@ export class StreamSubscription<T> {
 
       try {
         for await (const message of messages) {
-          this._queue.push(message);
+          await this._waitForQueueCapacity();
+
+          if (this._terminator.signal.aborted) {
+            break;
+          }
+
+          void this._queue.push(message);
         }
       } catch (err) {
         streamErr = err;
@@ -464,6 +542,10 @@ export class StreamSubscription<T> {
 
       const closedErr = await messagesClosed;
       const err = streamErr ?? closedErr;
+
+      if (this._terminator.signal.aborted) {
+        return;
+      }
 
       if (err && !isJetStreamFetchTimeout(err)) {
         if (this._terminator.signal.aborted) {
@@ -479,8 +561,30 @@ export class StreamSubscription<T> {
         throw err;
       }
 
-      await this._queue.drained();
+      if (!streamErr && !closedErr) {
+        await this._waitForQueueCapacity();
+      }
     }
+  }
+
+  private async _waitForQueueCapacity(): Promise<void> {
+    const maxLocalMessages = this._batchSize + this._concurrency;
+
+    while (!this._terminator.signal.aborted) {
+      const queued = this._queue.length() + this._queue.running();
+      if (queued < maxLocalMessages) {
+        return;
+      }
+
+      await sleep(10);
+    }
+  }
+
+  private _nextFetchMessageCount(): number {
+    const maxLocalMessages = this._batchSize + this._concurrency;
+    const queued = this._queue.length() + this._queue.running();
+    const available = Math.max(maxLocalMessages - queued, 1);
+    return Math.min(this._batchSize, available);
   }
 
   public get info(): ConsumerInfo {

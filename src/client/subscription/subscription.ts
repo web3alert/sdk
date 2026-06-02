@@ -37,7 +37,7 @@ function normalizeSubscriptionConcurrency(value: number | undefined): number {
     return 10;
   }
 
-  return Math.min(Math.max(Math.trunc(value), 1), 64);
+  return Math.min(Math.max(Math.trunc(value), 1), 256);
 }
 
 export class SubscriptionImpl<D extends TriggerDefinition> {

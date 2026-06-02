@@ -16,6 +16,16 @@ export type ActionParams<P> = {
   callback: ActionCallback<P>;
 };
 
+function getActionConcurrency(): number {
+  const value = Number(process.env['WEB3ALERT_ACTION_CONCURRENCY']);
+
+  if (!Number.isFinite(value)) {
+    return 32;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), 1), 256);
+}
+
 export class Action<P> {
   private _telemetry: Telemetry;
   private _core: Core;
@@ -51,6 +61,9 @@ export class Action<P> {
       name: `${this._name}.fun`,
       callback: async params => {
         await this._callback(params);
+      },
+      options: {
+        concurrency: getActionConcurrency(),
       },
     });
     await fun.init();

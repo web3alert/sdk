@@ -15,6 +15,11 @@ export type FunParams<P, R> = {
   core: Core;
   name: string;
   callback: FunCallback<P, R>;
+  options?: FunOptions;
+};
+
+export type FunOptions = {
+  concurrency?: number;
 };
 
 export class Fun<P, R> {
@@ -22,6 +27,7 @@ export class Fun<P, R> {
   private _core: Core;
   private _name: string;
   private _callback: FunCallback<P, R>;
+  private _options: FunOptions;
   private _subscription!: Subscription<P>;
   
   public ref: FunRef<P, R>;
@@ -32,12 +38,14 @@ export class Fun<P, R> {
       core,
       name,
       callback,
+      options,
     } = params;
     
     this._telemetry = telemetry;
     this._core = core;
     this._name = name;
     this._callback = callback;
+    this._options = options ?? {};
     
     this.ref = { name };
     
@@ -58,7 +66,10 @@ export class Fun<P, R> {
       } catch (err) {
         message.respond({ error: serializeError(err) });
       }
-    }, { queue: subject });
+    }, {
+      queue: subject,
+      concurrency: this._options.concurrency,
+    });
   }
   
   public async destroy(): Promise<void> {
