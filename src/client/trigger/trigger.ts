@@ -6,6 +6,7 @@ import { type Core } from '../../core';
 import { type StreamRef, Stream } from '../../stream';
 import { type BucketSlice, type BucketCell } from '../../bucket';
 import { type MutexCell } from '../../multimutex';
+import { getNumber } from '../../env';
 import { SliceSpawner } from '../../slice-spawner';
 import { Emitter } from '../local/emitter';
 import {
@@ -30,6 +31,21 @@ export type TriggerTask<P> = {
 export type TriggerState = {
   lastCleanupAt: number;
 };
+
+const DEFAULT_TRIGGER_STREAM_MAX_BYTES = 100 * 1024 * 1024;
+const MIN_TRIGGER_STREAM_MAX_BYTES = 1024 * 1024;
+const MAX_TRIGGER_STREAM_MAX_BYTES = 10 * 1024 * 1024 * 1024;
+
+function triggerStreamMaxBytes(): number {
+  const value = getNumber('WEB3ALERT_TRIGGER_STREAM_MAX_BYTES', DEFAULT_TRIGGER_STREAM_MAX_BYTES);
+  if (value < MIN_TRIGGER_STREAM_MAX_BYTES || value > MAX_TRIGGER_STREAM_MAX_BYTES) {
+    throw new Error(
+      `WEB3ALERT_TRIGGER_STREAM_MAX_BYTES should be between ${MIN_TRIGGER_STREAM_MAX_BYTES} and ${MAX_TRIGGER_STREAM_MAX_BYTES}`,
+    );
+  }
+
+  return Math.trunc(value);
+}
 
 export type TriggerSubscribeParams<P> = {
   params: P;
@@ -113,6 +129,9 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           telemetry: this._telemetry.child('events', { labels: { trigger: this._name } }),
           core: this._core,
           name: `trigger.${this._name}.events`,
+          options: {
+            maxSize: triggerStreamMaxBytes(),
+          },
         });
         await stream.init();
         
