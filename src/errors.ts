@@ -57,6 +57,35 @@ export function serializeError(err: unknown): unknown {
   };
 }
 
+// Errors carrying a numeric `redeliveryDelayMs` ask the stream subscription to
+// nak the message with that exact delay instead of the default exponential
+// backoff. Used for parked executions waiting on an external readiness
+// condition (provider retry). The marker is looked up across the cause chain
+// so wrappers do not hide it.
+export const REDELIVERY_DELAY_FIELD = 'redeliveryDelayMs';
+
+const REDELIVERY_DELAY_MAX_CAUSE_DEPTH = 8;
+
+export function getRequestedRedeliveryDelayMs(err: unknown): number | undefined {
+  let current: unknown = err;
+
+  for (let depth = 0; depth < REDELIVERY_DELAY_MAX_CAUSE_DEPTH && current != null; depth += 1) {
+    if (typeof current == 'object') {
+      const value = (current as Record<string, unknown>)[REDELIVERY_DELAY_FIELD];
+      if (typeof value == 'number' && Number.isFinite(value) && value >= 0) {
+        return Math.trunc(value);
+      }
+
+      current = (current as { cause?: unknown }).cause;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  return undefined;
+}
+
 export function deserializeError(value: unknown): Web3alertError {
   if (isWeb3alertErrorLike(value) && 'code' in value && typeof value.code === 'string') {
     if (value.code == 'EFAIL') {
