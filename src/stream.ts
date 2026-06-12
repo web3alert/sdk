@@ -14,7 +14,7 @@ import {
 } from 'nats';
 import { type Gauge, type Telemetry, type ErrorCallback, type Headers } from './types';
 import { defaults, setup, toHeaders, fromHeaders } from './utils';
-import { Web3alertError } from './errors';
+import { Web3alertError, getRequestedRedeliveryDelayMs } from './errors';
 import { type Core } from './core';
 
 export type StreamRef = {
@@ -407,19 +407,34 @@ export class StreamSubscription<T> {
           consumer: this._info.name,
         }, message.seq);
       } catch (err) {
-        this._core.warn(new Web3alertError('message handling failed', {
-          cause: err,
-          details: {
+        const requestedDelayMs = getRequestedRedeliveryDelayMs(err);
+
+        if (requestedDelayMs == undefined) {
+          this._core.warn(new Web3alertError('message handling failed', {
+            cause: err,
+            details: {
+              ref: this._ref,
+              name: this._name,
+              subject: message.subject,
+              sequence: message.seq,
+              redeliveryCount: message.info.redeliveryCount,
+              data: summarizeStreamPayload(data),
+            },
+          }));
+        } else {
+          this._telemetry.debug({
+            err,
             ref: this._ref,
             name: this._name,
             subject: message.subject,
             sequence: message.seq,
             redeliveryCount: message.info.redeliveryCount,
-            data: summarizeStreamPayload(data),
-          },
-        }));
+            redeliveryDelayMs: requestedDelayMs,
+          }, 'message handler requested delayed redelivery');
+        }
 
-        const after = Math.min(1000 * Math.pow(2, message.info.redeliveryCount), 120_000);
+        const after = requestedDelayMs
+          ?? Math.min(1000 * Math.pow(2, message.info.redeliveryCount), 120_000);
 
         message.nak(after);
       }
