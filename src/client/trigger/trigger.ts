@@ -236,6 +236,10 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
       const p = this._core.options.heartbeatInterval * 2;
       const timeout = this._core.options.heartbeatInterval * 4;
       this._timer = await this._core.localTimer(`${this._name}.cleanup-timer`, p, async () => {
+        if (!this._tasksActive) {
+          return;
+        }
+
         await this._mutex.lock(async () => {
           await this._state.mutate(async (state, write) => {
             if (!state) {
@@ -462,10 +466,6 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   }
 
   private async _syncTasksActiveState(): Promise<void> {
-    if (!this._hooks?.onTasksActiveChange) {
-      return;
-    }
-
     const keys = await this._tasks.keys();
     const nextActive = keys.length > 0;
     if (nextActive == this._tasksActive) {
@@ -473,6 +473,6 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
     }
 
     this._tasksActive = nextActive;
-    await this._hooks.onTasksActiveChange(nextActive);
+    await this._hooks?.onTasksActiveChange?.(nextActive);
   }
 }
