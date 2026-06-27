@@ -16,17 +16,12 @@ import {
   type InferTriggerOutput,
   type InferTriggerTest,
   type TriggerLifecycleHooks,
+  type TriggerTask,
   type TriggerRef,
   type Trigger,
   type TriggerRunner,
   type TriggerTester,
 } from './types';
-
-export type TriggerTask<P> = {
-  timestamp: string;
-  params: P;
-  subscribers?: Record<string, string>;
-};
 
 export type TriggerState = {
   lastCleanupAt: number;
@@ -79,7 +74,7 @@ export type TriggerImplParams<D extends TriggerDefinition> = {
   name: string;
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
-  hooks?: TriggerLifecycleHooks;
+  hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
 };
 
 export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
@@ -88,7 +83,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   private _name: string;
   private _runner: TriggerRunner<D>;
   private _tester: TriggerTester<D>;
-  private _hooks?: TriggerLifecycleHooks;
+  private _hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
   private _emitter!: Emitter<InferTriggerInput<D>>;
   private _stream!: Stream<InferTriggerOutput<D>>;
   private _tasks!: BucketSlice<TriggerTask<InferTriggerParams<D>>>;
@@ -146,6 +141,38 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           name: this._name,
           slice: this._tasks,
           changed: (prev, next) => hashOf(prev.params) != hashOf(next.params),
+          onUpdate: async update => {
+            if (!this._hooks?.onTaskChange) {
+              return;
+            }
+
+            try {
+              if (update.operation == 'PUT') {
+                await this._hooks.onTaskChange({
+                  operation: 'PUT',
+                  key: update.key,
+                  online: update.online,
+                  revision: update.revision,
+                  task: update.value,
+                });
+                return;
+              }
+
+              await this._hooks.onTaskChange({
+                operation: 'DEL',
+                key: update.key,
+                online: update.online,
+                revision: update.revision,
+              });
+            } catch (err) {
+              this._telemetry.warn({
+                err,
+                trigger: this._name,
+                key: update.key,
+                operation: update.operation,
+              }, 'trigger task lifecycle hook failed');
+            }
+          },
           callback: async params => {
             const { key, value } = params;
             

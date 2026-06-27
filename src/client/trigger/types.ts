@@ -25,6 +25,29 @@ export type TriggerWorker<P, O> = {
   publish(output: O | O[]): Promise<void>;
 };
 
+export type TriggerTask<P> = {
+  timestamp: string;
+  params: P;
+  subscribers?: Record<string, string>;
+};
+
+export type TriggerTaskPutUpdate<P> = {
+  operation: 'PUT';
+  key: string;
+  online: boolean;
+  revision: number;
+  task: TriggerTask<P>;
+};
+
+export type TriggerTaskDeleteUpdate = {
+  operation: 'DEL';
+  key: string;
+  online: boolean;
+  revision: number;
+};
+
+export type TriggerTaskUpdate<P> = TriggerTaskPutUpdate<P> | TriggerTaskDeleteUpdate;
+
 export type TriggerExecuteCallback<I> = (input: I) => Promise<void>;
 
 export type TriggerDaemonCallback<P, I, O> = (
@@ -39,8 +62,9 @@ export type TriggerRunner<D extends TriggerDefinition> =
 export type TriggerTester<D extends TriggerDefinition> =
   TriggerTestCallback<InferTriggerTest<D>, InferTriggerInput<D>>;
 
-export type TriggerLifecycleHooks = {
+export type TriggerLifecycleHooks<P = unknown> = {
   onTasksActiveChange?: (active: boolean) => Promise<void>;
+  onTaskChange?: (update: TriggerTaskUpdate<P>) => Promise<void>;
 };
 
 export type Trigger<D extends TriggerDefinition> = {

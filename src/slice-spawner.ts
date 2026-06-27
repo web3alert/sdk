@@ -2,7 +2,7 @@ import { type Destructible } from './types';
 import { setup } from './utils';
 import { type ChangedCallback, Spawner } from './spawner';
 import { type BucketSlice } from './bucket';
-import { type Watcher } from './watcher';
+import { type Update, type Watcher } from './watcher';
 import { type Core } from './core';
 
 export type SliceSpawnerCallbackParams<V> = {
@@ -16,12 +16,15 @@ export type SliceSpawnerCallback<V, W extends Destructible> = (
   params: SliceSpawnerCallbackParams<V>,
 ) => Promise<W>;
 
+export type SliceSpawnerUpdateCallback<V> = (update: Update<V>) => Promise<void>;
+
 export type SliceSpawnerParams<V, W extends Destructible> = {
   core: Core;
   name: string;
   slice: BucketSlice<V>;
   changed: ChangedCallback<V>;
   callback: SliceSpawnerCallback<V, W>;
+  onUpdate?: SliceSpawnerUpdateCallback<V>;
 };
 
 export class SliceSpawner<V, W extends Destructible> {
@@ -30,6 +33,7 @@ export class SliceSpawner<V, W extends Destructible> {
   private _slice: BucketSlice<V>;
   private _changed: ChangedCallback<V>;
   private _callback: SliceSpawnerCallback<V, W>;
+  private _onUpdate?: SliceSpawnerUpdateCallback<V>;
   private _spawner!: Spawner<V, W>;
   private _watcher!: Watcher<V>;
   
@@ -40,6 +44,7 @@ export class SliceSpawner<V, W extends Destructible> {
       slice,
       changed,
       callback,
+      onUpdate,
     } = params;
     
     this._core = core;
@@ -47,6 +52,7 @@ export class SliceSpawner<V, W extends Destructible> {
     this._slice = slice;
     this._changed = changed;
     this._callback = callback;
+    this._onUpdate = onUpdate;
   }
   
   public async init(): Promise<void> {
@@ -76,6 +82,8 @@ export class SliceSpawner<V, W extends Destructible> {
           if (update.operation == 'DEL') {
             await spawner.destroyItem(update.key);
           }
+
+          await this._onUpdate?.(update);
         }, { detach: true });
       });
       

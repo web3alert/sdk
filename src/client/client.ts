@@ -33,7 +33,7 @@ export type ClientTriggerParams<D extends TriggerDefinition> = {
   name: string;
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
-  hooks?: TriggerLifecycleHooks;
+  hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
 };
 
 export type ClientSubscribeOptions = Pick<Partial<StreamSubscriptionOptions>, 'concurrency'>;
