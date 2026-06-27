@@ -338,9 +338,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
             });
           });
 
-          if (taskWritten || !this._tasksActive) {
-            await this._syncTasksActiveState();
-          }
+          await this._setTasksActiveState(true);
           
           ctx.res.data = { stream: this._stream.ref, key };
         } catch (err) {
@@ -467,7 +465,10 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
 
   private async _syncTasksActiveState(): Promise<void> {
     const keys = await this._tasks.keys();
-    const nextActive = keys.length > 0;
+    await this._setTasksActiveState(keys.length > 0);
+  }
+
+  private async _setTasksActiveState(nextActive: boolean): Promise<void> {
     if (nextActive == this._tasksActive) {
       return;
     }
