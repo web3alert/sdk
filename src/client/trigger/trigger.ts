@@ -42,6 +42,25 @@ function triggerStreamMaxBytes(): number {
   return Math.trunc(value);
 }
 
+function taskSubscriberLeaseRefreshIntervalMs(heartbeatIntervalMs: number): number {
+  return Math.max(heartbeatIntervalMs, heartbeatIntervalMs * 2);
+}
+
+function isFreshTaskSubscriberLease<P>(
+  task: TriggerTask<P> | undefined,
+  subscriberKey: string,
+  nowMs: number,
+  refreshIntervalMs: number,
+): boolean {
+  const timestamp = task?.subscribers?.[subscriberKey];
+  if (!timestamp) {
+    return false;
+  }
+
+  const timestampMs = new Date(timestamp).getTime();
+  return Number.isFinite(timestampMs) && nowMs - timestampMs < refreshIntervalMs;
+}
+
 export type TriggerSubscribeParams<P> = {
   params: P;
   subscriber?: string;
@@ -292,11 +311,19 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           const { params, subscriber } = ctx.req.data;
           
           const now = new Date();
+          const nowMs = now.getTime();
           const timestamp = now.toISOString();
           const key = hashOf(params);
           const subscriberKey = subscriber ?? 'default';
+          const refreshIntervalMs = taskSubscriberLeaseRefreshIntervalMs(this._core.options.heartbeatInterval);
+          let taskWritten = false;
           
           await this._tasks.mutate(key, async (prev, write) => {
+            if (isFreshTaskSubscriberLease(prev, subscriberKey, nowMs, refreshIntervalMs)) {
+              return;
+            }
+
+            taskWritten = true;
             await write({
               timestamp,
               params,
@@ -307,7 +334,9 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
             });
           });
 
-          await this._syncTasksActiveState();
+          if (taskWritten || !this._tasksActive) {
+            await this._syncTasksActiveState();
+          }
           
           ctx.res.data = { stream: this._stream.ref, key };
         } catch (err) {
