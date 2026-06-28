@@ -4,6 +4,7 @@ import {
   type JetStreamPublishOptions,
   type ConsumerInfo,
   type Consumer,
+  type ConsumerMessages,
   type JsMsg,
   NatsError,
   RetentionPolicy,
@@ -193,6 +194,7 @@ export type StreamSubscriptionOptions = {
   filter: string;
   concurrency: number;
   batchSize: number;
+  fetchExpiresMs: number;
   error: ErrorCallback;
 };
 
@@ -211,6 +213,14 @@ function normalizeStreamSubscriptionBatchSize(value: number | undefined, concurr
   }
 
   return Math.min(Math.max(Math.trunc(value), 1), 1000);
+}
+
+function normalizeStreamSubscriptionFetchExpiresMs(value: number | undefined): number {
+  if (value == undefined || !Number.isFinite(value)) {
+    return 10_000;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), 1_000), 120_000);
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -344,9 +354,11 @@ export class StreamSubscription<T> {
   private _filter?: string;
   private _concurrency: number;
   private _batchSize: number;
+  private _fetchExpiresMs: number;
   private _error?: ErrorCallback;
   private _info!: ConsumerInfo;
   private _consumer!: Consumer;
+  private _activeMessages?: ConsumerMessages;
   private _terminator!: AbortController;
   private _queue!: fastq.queueAsPromised<JsMsg, void>;
   private _loop!: Promise<void>;
@@ -374,6 +386,7 @@ export class StreamSubscription<T> {
     this._filter = options?.filter;
     this._concurrency = options?.concurrency ?? 1;
     this._batchSize = normalizeStreamSubscriptionBatchSize(options?.batchSize, this._concurrency);
+    this._fetchExpiresMs = normalizeStreamSubscriptionFetchExpiresMs(options?.fetchExpiresMs);
     this._error = options?.error;
 
     this._gaugeLastConsumedSeq = this._telemetry.gauge({
@@ -487,6 +500,7 @@ export class StreamSubscription<T> {
 
   public async destroy(): Promise<void> {
     this._terminator?.abort();
+    this._stopActiveMessages();
 
     await this._loop;
 
@@ -507,6 +521,15 @@ export class StreamSubscription<T> {
     this._telemetry.destroy();
   }
 
+  private _stopActiveMessages(): void {
+    try {
+      this._activeMessages?.stop();
+    } catch {
+      // Best-effort shutdown helper. The consume loop also observes _terminator
+      // and treats fetch closure during destroy as a normal exit path.
+    }
+  }
+
   private async _consume(): Promise<void> {
     while (!this._terminator.signal.aborted) {
       await this._waitForQueueCapacity();
@@ -522,8 +545,9 @@ export class StreamSubscription<T> {
       try {
         messages = await this._consumer.fetch({
           max_messages: maxMessages,
-          expires: 1_000,
+          expires: this._fetchExpiresMs,
         });
+        this._activeMessages = messages;
         messagesClosed = messages.closed().catch(err => err as Error);
       } catch (err) {
         if (this._terminator.signal.aborted) {
@@ -553,6 +577,10 @@ export class StreamSubscription<T> {
         }
       } catch (err) {
         streamErr = err;
+      } finally {
+        if (this._activeMessages == messages) {
+          this._activeMessages = undefined;
+        }
       }
 
       const closedErr = await messagesClosed;
