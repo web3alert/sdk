@@ -16,6 +16,17 @@ export type Link = {
   url: string;
 };
 
+export type TriggerRuntimeMetadata = {
+  triggerFullname?: string;
+  revision?: number;
+  durationMs?: number;
+  outputIndex?: number;
+  outputCount?: number;
+  eventId?: string;
+  sourceFullname?: string;
+  bindingId?: string;
+};
+
 export type TriggerOutput = {
   title?: string;
   message?: MessageVariants;
@@ -24,6 +35,13 @@ export type TriggerOutput = {
   cover?: string;
   avatar?: string;
   data?: object;
+  raw?: Record<string, unknown>;
+  human?: Record<string, unknown>;
+  payload?: {
+    __runtime?: TriggerRuntimeMetadata;
+    __system?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 };
 
 export type TriggerInfo = {

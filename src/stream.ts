@@ -340,6 +340,9 @@ function summarizeStreamPayload(value: unknown): unknown {
         ...(typeof runtime['durationMs'] == 'number' ? { durationMs: runtime['durationMs'] } : {}),
         ...(typeof runtime['outputIndex'] == 'number' ? { outputIndex: runtime['outputIndex'] } : {}),
         ...(typeof runtime['outputCount'] == 'number' ? { outputCount: runtime['outputCount'] } : {}),
+        ...(typeof runtime['eventId'] == 'string' ? { eventId: runtime['eventId'] } : {}),
+        ...(typeof runtime['sourceFullname'] == 'string' ? { sourceFullname: runtime['sourceFullname'] } : {}),
+        ...(typeof runtime['bindingId'] == 'string' ? { bindingId: runtime['bindingId'] } : {}),
       },
     } : {}),
   };
