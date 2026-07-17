@@ -63,6 +63,10 @@ jobs:
           echo "should_publish=${should_publish}" >> "$GITHUB_OUTPUT"
           echo "bump=${bump:-none}" >> "$GITHUB_OUTPUT"
 
+      - name: Prepare package version
+        if: steps.release.outputs.should_publish == 'true' && steps.release.outputs.bump != 'none'
+        run: npm version "${{ steps.release.outputs.bump }}" --no-git-tag-version
+
       - name: Build package
         if: steps.release.outputs.should_publish == 'true'
         run: npm run build
@@ -79,14 +83,17 @@ jobs:
         if: steps.release.outputs.should_publish == 'true'
         run: npm pack --dry-run
 
-      - name: Bump package version
+      - name: Commit package version
         if: steps.release.outputs.should_publish == 'true' && steps.release.outputs.bump != 'none'
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          npm version "${{ steps.release.outputs.bump }}" -m "chore(release): publish sdk v%s [skip ci]"
+          version="$(node -p "require('./package.json').version")"
+          git add package.json package-lock.json
+          git commit -m "chore(release): publish sdk v${version} [skip ci]"
+          git tag "v${version}"
           git push --follow-tags
 
       - name: Publish package
