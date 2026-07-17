@@ -236,3 +236,18 @@ export type Trapdoor = {
 };
 
 export type Headers = Record<string, string | string[]>;
+
+/**
+ * Raw source event consumed by the alert engine.
+ *
+ * This is intentionally distinct from the formatted notification event in
+ * `@web3alert/types`.
+ */
+export type Event = {
+  name: string;
+  params: {
+    raw: Record<string, any>;
+    human?: Record<string, any>;
+  };
+  payload?: Record<string, any>;
+};

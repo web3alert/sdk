@@ -44,17 +44,17 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run clean && npm run build"
+    "test": "npm run build && npm run test:types && node --test test/public-entrypoint.test.cjs",
+    "test:types": "tsc -p tsconfig.test.json",
+    "verify:package": "node scripts/verify-package.cjs",
+    "prepublishOnly": "npm test && npm run verify:package"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@web3alert/types": "^6.22.0",
-    "amqp-connection-manager": "^4.1.14",
-    "amqplib": "^0.10.9",
     "chalk": "^4.1.2",
     "cron-parser": "^4.9.0",
     "eventemitter3": "^5.0.1",
@@ -67,7 +67,6 @@
     "yaml": "^2.8.3"
   },
   "devDependencies": {
-    "@types/amqplib": "^0.10.7",
     "@types/lodash": "^4.17.6",
     "@types/node": "^20.14.0",
     "typescript": "^5.4.5"

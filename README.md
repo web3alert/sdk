@@ -5,6 +5,7 @@ A comprehensive TypeScript SDK for building distributed microservices and event-
 ## Table of Contents
 
 - [Installation](#installation)
+- [Version 4](#version-4)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
   - [Connection & App](#connection--app)
@@ -25,6 +26,17 @@ A comprehensive TypeScript SDK for building distributed microservices and event-
 ```bash
 npm install @web3alert/sdk
 ```
+
+## Version 4
+
+Version 4 is NATS-only. The old RabbitMQ source runtime has been removed, including
+`BusClient`, `SourceBusClient`, `System`, `PollRunner`, `LegacySource`, and the
+legacy source API/cache helpers. Deprecated source services must remain pinned to
+their existing SDK version; they are not compatible with version 4.
+
+The top-level `HttpAgent` API and raw engine `Event` type remain available with
+their existing contracts. Product/domain contracts must be imported directly from
+`@web3alert/types` instead of relying on it as a transitive SDK dependency.
 
 ## Quick Start
 

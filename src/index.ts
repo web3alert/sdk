@@ -17,7 +17,7 @@ export * from './env';
 export * from './async-map';
 export * from './compare';
 export * from './monitor';
-export * from './legacy';
+export * from './http-agent';
 export * from './launch';
 export * from './web-server';
 export * from './mutex';
