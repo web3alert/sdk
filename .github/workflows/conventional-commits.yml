@@ -33,7 +33,7 @@ jobs:
           elif [[ -n "${PUSH_BEFORE}" && ! "${PUSH_BEFORE}" =~ ^0+$ ]]; then
             range="${PUSH_BEFORE}..${HEAD_SHA}"
 
-            policy_base="$(git log --format=%H --reverse -- .github/workflows/conventional-commits.yml | head -n 1)"
+            policy_base="$(git log --format=%H --reverse -- .github/workflows/conventional-commits.yml | sed -n '1p')"
             if [[ -n "${policy_base}" ]] && git merge-base --is-ancestor "${PUSH_BEFORE}" "${policy_base}"; then
               range="${policy_base}^..${HEAD_SHA}"
             fi
