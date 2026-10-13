@@ -12,6 +12,7 @@ export type BlockchainUpstreamSpec<S> = {
 };
 
 export type BlockchainOptions = {
+  headSubscriptionActive: boolean;
   upstreamTimeout: number;
   upstreamAcquireTimeout: number;
   upstreamAcquirePoll: number;
@@ -51,6 +52,7 @@ export class Blockchain<S, B extends Backend> {
     this._specs = specs;
     this._factory = factory;
     this._options = defaults(options, {
+      headSubscriptionActive: true,
       upstreamTimeout: 30_000,
       upstreamAcquireTimeout: 1_000,
       upstreamAcquirePoll: 100,
@@ -127,7 +129,8 @@ export class Blockchain<S, B extends Backend> {
     const online = [];
     
     for (const upstream of this._upstreams.values()) {
-      if (now - upstream.timestamp < this._options.upstreamTimeout) {
+      if (upstream.backend && (!upstream.headSubscriptionActive
+        || now - upstream.timestamp < this._options.upstreamTimeout)) {
         online.push(upstream);
       }
     }
@@ -146,6 +149,7 @@ export class Blockchain<S, B extends Backend> {
             name: upstreamName,
             spec: backendSpec,
             factory: this._factory,
+            headSubscriptionActive: this._options.headSubscriptionActive,
           });
           await upstream.init();
           
@@ -178,6 +182,13 @@ export class Blockchain<S, B extends Backend> {
   
   public async listen(callback: BlockCallback): Promise<Destructible> {
     return await this._source.listen(callback);
+  }
+
+  /** Suspend head polling/WS without destroying on-demand backend methods. */
+  public async setHeadSubscriptionActive(active: boolean): Promise<void> {
+    this._options.headSubscriptionActive = active;
+    await Promise.all(Array.from(this._upstreams.values(), upstream =>
+      upstream.setHeadSubscriptionActive(active)));
   }
   
   public async upstream(): Promise<B | undefined> {

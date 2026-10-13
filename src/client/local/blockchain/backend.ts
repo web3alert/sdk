@@ -8,6 +8,8 @@ export type Backend = {
   init(): Promise<void>;
   destroy(): Promise<void>;
   subscribe(callback: BackendBlockCallback): Promise<BackendUnsubscribe>;
+  /** Optional adapter for transport housekeeping tied to head subscriptions. */
+  setHeadSubscriptionActive?(active: boolean): Promise<void>;
 };
 
 export type BackendFactoryContext = {

@@ -11,6 +11,7 @@ export type UpstreamParams<S, B extends Backend> = {
   name: string;
   spec: S;
   factory: BackendFactory<S, B>;
+  headSubscriptionActive?: boolean;
 };
 
 export class Upstream<S, B extends Backend> {
@@ -23,6 +24,9 @@ export class Upstream<S, B extends Backend> {
   private _emitter: EventEmitter<{ block: [block: number] }>;
   private _immortal!: Immortal;
   private _backend?: B;
+  private _headSubscriptionActive: boolean;
+  private _headUnsubscribe?: () => Promise<void>;
+  private _headTransition: Promise<void> = Promise.resolve();
   
   constructor(params: UpstreamParams<S, B>) {
     const {
@@ -38,6 +42,7 @@ export class Upstream<S, B extends Backend> {
     this._factory = factory;
     this._block = -1;
     this._timestamp = 0;
+    this._headSubscriptionActive = params.headSubscriptionActive !== false;
     this._emitter = new EventEmitter();
   }
   
@@ -57,13 +62,13 @@ export class Upstream<S, B extends Backend> {
               
               this._telemetry.debug('subscribing to blocks');
               
-              const unsubscribe = await use(async () => {
-                const unsubscribe = await backend.subscribe(block => {
-                  this._emitter.emit('block', block);
-                });
-                
-                return { destroy: unsubscribe };
-              });
+              this._backend = backend;
+              try {
+                await this._syncHeadSubscription();
+              } catch (err) {
+                if (this._backend === backend) this._backend = undefined;
+                throw err;
+              }
               
               this._telemetry.debug('online');
               
@@ -71,11 +76,13 @@ export class Upstream<S, B extends Backend> {
               
               return {
                 destroy: async () => {
-                  this._backend = undefined;
-                  
                   this._telemetry.debug('unsubscribing from blocks');
-                  
-                  await unsubscribe.destroy();
+                  await this._withHeadTransition(async () => {
+                    if (this._backend !== backend) return;
+                    await this._headUnsubscribe?.();
+                    this._headUnsubscribe = undefined;
+                    this._backend = undefined;
+                  });
                   
                   this._telemetry.debug('stopping backend');
                   
@@ -96,6 +103,41 @@ export class Upstream<S, B extends Backend> {
   
   public async destroy(): Promise<void> {
     await this._immortal.destroy();
+  }
+
+  private async _withHeadTransition(task: () => Promise<void>): Promise<void> {
+    this._headTransition = this._headTransition.catch(() => {}).then(task);
+    await this._headTransition;
+  }
+
+  private async _syncHeadSubscription(): Promise<void> {
+    await this._withHeadTransition(async () => {
+      if (!this._headSubscriptionActive) {
+        await this._headUnsubscribe?.();
+        this._headUnsubscribe = undefined;
+        await this._backend?.setHeadSubscriptionActive?.(false);
+        return;
+      }
+      const backend = this._backend;
+      if (backend && !this._headUnsubscribe) {
+        await backend.setHeadSubscriptionActive?.(true);
+        this._headUnsubscribe = await backend.subscribe(block => {
+          if (this._headSubscriptionActive && this._backend === backend) {
+            this._emitter.emit('block', block);
+          }
+        });
+      }
+    });
+  }
+
+  /** Transport primitive only. Runtime, not SDK, decides when capture is needed. */
+  public async setHeadSubscriptionActive(active: boolean): Promise<void> {
+    this._headSubscriptionActive = active;
+    await this._syncHeadSubscription();
+  }
+
+  public get headSubscriptionActive(): boolean {
+    return this._headSubscriptionActive;
   }
   
   public async listen(callback: BlockCallback): Promise<Destructible> {

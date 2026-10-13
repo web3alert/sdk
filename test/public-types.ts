@@ -3,11 +3,18 @@ import {
   HttpAgentClientError,
   HttpAgentError,
   type Event,
+  type ClientLocal,
   type HttpAgentClientErrorOptions,
   type HttpAgentErrorOptions,
   type HttpAgentParams,
   type HttpAgentRequestParams,
 } from '../dist';
+
+declare const source: Awaited<ReturnType<ClientLocal['blockchain']>>;
+const pause: Promise<void> = source.setHeadSubscriptionActive(false);
+const headOptions: Parameters<ClientLocal['blockchain']>[3] = { headSubscriptionActive: false };
+void pause;
+void headOptions;
 
 const event: Event = {
   name: 'transfer',
