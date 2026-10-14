@@ -636,6 +636,56 @@ const metricsServer = new WebServer({
 await metricsServer.init();
 ```
 
+## Cancellable action delivery
+
+Notification senders can opt into a durable cancellation boundary. This is a
+transport primitive; the application controller decides whether a subscription
+was cancelled. A technical restart or missing registry entry is not cancellation.
+
+```typescript
+import { actionDeliveryFence } from '@web3alert/sdk';
+
+const fence = await actionDeliveryFence(client.core);
+// Controller only, after an authoritative active-subscription read.
+const delivery = await fence.open('subscription.example');
+
+await sender.action('send').params<{ url: string }>().callback(async (input, guard) => {
+  // Perform local queueing/rate limiting BEFORE guard.start(). Every fallback
+  // or retry needs its own start; do not enable unguarded HTTP-library retries.
+  const response = await guard.start(() => fetch(input.params.url, {
+    method: 'POST', redirect: 'manual',
+  }));
+  await response.text();
+}, { guardedDelivery: true });
+
+// Pass `delivery` in ActionInput when calling client.execute().
+// On explicit user cancellation, await this BEFORE upstream unsubscribe:
+await fence.cancel(delivery);
+```
+
+Guarded commands use a distinct `.guarded.fun` subject. Old senders cannot
+silently accept them without checking cancellation. Upgrade senders before
+enabling guarded commands in their caller. Unmarked actions remain compatible.
+
+Cancellation is confirmed only after its durable write and all admitted request
+starts are acknowledged. It does not wait for already-issued HTTP responses or
+abort them. Queued requests and subsequent retries/fallbacks cannot start after
+confirmation. The controller retries an `unavailable` cancellation until it is
+confirmed; it must not remove upstream demand first. An unavailable pre-request
+guard is not a delivery failure to acknowledge/drop; retain the accepted work.
+
+There is one file-backed `action-delivery` KV record per key. Its generation
+survives restart; `open()` after cancellation creates a new generation. Old
+callbacks and cancellation requests cannot affect it. Do not use changing
+processing/checkpoint revisions as delivery generations.
+
+Admission has no automatic expiry. If a sender dies in the short interval
+between admission and acknowledging the request start, cancellation remains
+pending rather than falsely confirming. Do not clear the admission while that
+old process could resume. During planned deployment, complete these short start
+sections before stopping the sender; an unconfirmed boundary aborts switching.
+This primitive does not transfer in-flight action RPCs or implement delivery replay.
+
 ## Requirements
 
 - Node.js >= 18

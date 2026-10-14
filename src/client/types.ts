@@ -57,6 +57,7 @@ export type ProjectInfo = {
 };
 
 export type ActionInput<P> = {
+  delivery?: import('../action-delivery').ActionDeliveryRef;
   workspace: string;
   subscription: string;
   trigger: TriggerInfo;
