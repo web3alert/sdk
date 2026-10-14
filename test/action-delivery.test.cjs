@@ -67,6 +67,18 @@ test('generation survives restart; old cancellation cannot revoke a new generati
   assert.equal(db.records.size, 2, 'bounded to one control record per subscription');
 });
 
+test('a caller cannot reactivate a cancelled ref over the fresh generation', async () => {
+  const fence = new ActionDeliveryFence(store()), old = await fence.open('one');
+  await fence.cancel(old);
+  const fresh = await fence.open('one');
+  assert.equal(fence.activate, undefined, 'only controller open may allocate a fresh generation');
+  await assert.rejects(fence.start(old, async () => assert.fail('old generation sent')), cancelled);
+  await fence.cancel(old);
+  assert.deepEqual(await fence.open('one'), fresh);
+  await fence.check(fresh);
+  await fence.start(fresh, async () => {});
+});
+
 test('missing/failed control does not mean cancelled and cannot issue HTTP', async () => {
   let calls = 0;
   const db = store(), fence = new ActionDeliveryFence(db);

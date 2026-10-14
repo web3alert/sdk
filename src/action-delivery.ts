@@ -55,17 +55,6 @@ export class ActionDeliveryFence {
     }
   }
 
-  async activate(ref: ActionDeliveryRef): Promise<void> {
-    await this.mutate(ref, async (state, write) => {
-      if (state?.generation === ref.generation) {
-        if (state.cancelled) throw actionDeliveryError('cancelled');
-        return;
-      }
-      if (state?.starting) throw actionDeliveryError('unavailable');
-      await write({ ...ref, cancelled: false });
-    });
-  }
-
   async check(ref: ActionDeliveryRef): Promise<void> {
     await this.mutate(ref, async state => {
       if (!state) throw actionDeliveryError('unavailable');
