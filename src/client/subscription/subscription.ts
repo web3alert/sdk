@@ -55,6 +55,7 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
   private _subscriptionBroken: boolean;
   private _restore?: Promise<void>;
   private _destroying: boolean;
+  private _close?: Promise<void>;
   
   constructor(params: SubscriptionImplParams<D>) {
     const {
@@ -139,20 +140,22 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
           const subscribeResult = await callSubscribe();
           const previous = this._subscription;
           this._subscriptionBroken = true;
-          this._subscription = undefined as unknown as typeof this._subscription;
           
           if (previous) {
             try {
-              await previous.destroy();
+              await previous.suspend();
             } catch (err) {
               this._telemetry.warn({
                 err,
                 trigger: this._trigger.name,
                 subscription: this._name,
                 reason,
-              }, 'failed to destroy broken runtime stream subscription');
+              }, 'failed to suspend broken runtime stream subscription');
+              throw err;
             }
           }
+
+          this._subscription = undefined as unknown as typeof this._subscription;
           
           await attachStream(subscribeResult);
           this._telemetry.info({
@@ -208,13 +211,29 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
   }
   
   public async destroy(): Promise<void> {
+    return await this._closeOnce(false);
+  }
+
+  public async suspend(): Promise<void> {
+    return await this._closeOnce(true);
+  }
+
+  private _closeOnce(retainConsumer: boolean): Promise<void> {
+    this._close ??= this._stop(retainConsumer).catch(err => {
+      this._close = undefined;
+      throw err;
+    });
+    return this._close;
+  }
+
+  private async _stop(retainConsumer: boolean): Promise<void> {
     this._destroying = true;
-    await this._service.destroy();
-    await this._timer.destroy();
+    await this._service?.destroy();
+    await this._timer?.destroy();
     if (this._restore) {
       await this._restore;
     }
-    if (this._subscriptionKey) {
+    if (this._subscriptionKey && !retainConsumer) {
       try {
         await this._core.call<TriggerUnsubscribeParams, void>(`trigger.${this._trigger.name}.api.unsubscribe`, {
           key: this._subscriptionKey,
@@ -231,7 +250,11 @@ export class SubscriptionImpl<D extends TriggerDefinition> {
       this._subscriptionKey = undefined;
     }
     if (this._subscription) {
-      await this._subscription.destroy();
+      if (retainConsumer) {
+        await this._subscription.suspend();
+      } else {
+        await this._subscription.destroy();
+      }
     }
     this._telemetry.destroy();
   }

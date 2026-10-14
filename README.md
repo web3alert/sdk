@@ -434,6 +434,32 @@ const subscription = await client.subscribe({
 });
 ```
 
+#### Restart-safe transport
+
+`await subscription.suspend()` stops local consumption and waits for in-flight
+callbacks, but retains the JetStream durable consumer, pending messages and task
+binding. Recreate the subscription with the same workspace/project/name and
+parameters to resume it. This closes the old handle permanently; subsequent
+client teardown is idempotent and does not delete its retained consumer. Ordinary
+client teardown without suspension still unsubscribes and deletes the consumer.
+The owner must explicitly clean retained resources when a suspended subscription
+is permanently removed. Task leases still expire normally; suspension does not
+renew demand indefinitely. Stream size/age limits still apply.
+
+`await trigger.executeForParams(input, acceptedParams)` dispatches previously
+accepted work using the same parameter-derived subjects and reducer state as
+normal execution, even if its task has since unsubscribed. Duplicate parameter
+sets are dispatched once per call. It does not register subscribers or renew
+leases. The caller owns the durable accepted-work record, retry policy and any
+new-subscriber cutoff. Publication failures propagate; retries remain
+at-least-once. With interest retention, a successful send is not a promise to
+retain messages after the last durable consumer has actually been removed.
+
+Run `npm test` for unit/type checks and `npm run test:transport` with a native
+`nats-server` on PATH for isolated JetStream restart, reconnect, pending/backlog,
+unsubscribe and repeated teardown checks. The latter creates and removes only
+its own temporary server/data directory; it does not use Docker.
+
 ### Actions
 
 Define reusable actions:

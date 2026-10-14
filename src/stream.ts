@@ -366,6 +366,7 @@ export class StreamSubscription<T> {
   private _queue!: fastq.queueAsPromised<JsMsg, void>;
   private _loop!: Promise<void>;
   private _loopError?: unknown;
+  private _close?: Promise<void>;
 
   private _gaugeLastConsumedSeq: Gauge;
 
@@ -502,6 +503,23 @@ export class StreamSubscription<T> {
   }
 
   public async destroy(): Promise<void> {
+    return await this._closeOnce(false);
+  }
+
+  /** Stop local delivery, retaining the durable consumer and its pending messages. */
+  public async suspend(): Promise<void> {
+    return await this._closeOnce(true);
+  }
+
+  private _closeOnce(retainConsumer: boolean): Promise<void> {
+    this._close ??= this._stop(retainConsumer).catch(err => {
+      this._close = undefined;
+      throw err;
+    });
+    return this._close;
+  }
+
+  private async _stop(retainConsumer: boolean): Promise<void> {
     this._terminator?.abort();
     this._stopActiveMessages();
 
@@ -511,7 +529,7 @@ export class StreamSubscription<T> {
       await this._queue.drained();
     }
 
-    if (this._info) {
+    if (this._info && !retainConsumer) {
       try {
         await this._core.jsm.consumers.delete(this._info.stream_name, this._info.name);
       } catch (err) {
@@ -552,6 +570,11 @@ export class StreamSubscription<T> {
         });
         this._activeMessages = messages;
         messagesClosed = messages.closed().catch(err => err as Error);
+        // Shutdown can start while fetch() is awaiting its consumer. In that
+        // case there was no active iterator for the shutdown path to stop.
+        if (this._terminator.signal.aborted) {
+          this._stopActiveMessages();
+        }
       } catch (err) {
         if (this._terminator.signal.aborted) {
           this._telemetry.warn({

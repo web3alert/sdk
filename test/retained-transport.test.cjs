@@ -1,0 +1,122 @@
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const { StreamSubscription } = require('../dist/stream');
+const { SubscriptionImpl } = require('../dist/client/subscription/subscription');
+const { TriggerImpl } = require('../dist/client/trigger/trigger');
+const { hashOf } = require('../dist/utils');
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+function telemetry() {
+  const noop = () => {};
+  return { wrap: (_, fn) => fn, child: telemetry, gauge: () => ({ set: noop }),
+    warn: noop, error: noop, debug: noop, info: noop, destroy: noop };
+}
+
+test('shutdown stops an iterator whose fetch resolves after shutdown began', { timeout: 2000 }, async () => {
+  const fetched = deferred(), started = deferred(), closed = deferred();
+  let stopped = 0, deleted = 0;
+  const messages = {
+    stop() { stopped++; closed.resolve(); },
+    closed: () => closed.promise,
+    async *[Symbol.asyncIterator]() { await closed.promise; },
+  };
+  const core = {
+    jsm: { consumers: { add: async () => ({ stream_name: 'stream', name: 'consumer' }),
+      delete: async () => { deleted++; } } },
+    js: { consumers: { get: async () => ({ fetch: async () => {
+      started.resolve(); return await fetched.promise;
+    } }) } },
+    uncaughtException: err => { throw err; },
+  };
+  const sub = new StreamSubscription({ telemetry: telemetry(), core, name: 'consumer',
+    ref: { stream: 'stream', subject: 'events' }, callback: async () => {} });
+  await sub.init(); await started.promise;
+  const closing = sub.suspend();
+  fetched.resolve(messages);
+  await closing; await sub.destroy(); await sub.suspend();
+  assert.equal(stopped, 1);
+  assert.equal(deleted, 0, 'container teardown must not delete a suspended consumer');
+});
+
+test('subscription suspension is final/idempotent; default removal still unsubscribes', async () => {
+  for (const retain of [true, false]) {
+    const counts = { service: 0, timer: 0, unsubscribe: 0, suspend: 0, destroy: 0 };
+    const sub = new SubscriptionImpl({ telemetry: telemetry(), core: {
+      call: async () => { counts.unsubscribe++; },
+    }, name: 'consumer', trigger: { name: 'trigger' }, params: {}, callback: async () => {} });
+    sub._service = { destroy: async () => { counts.service++; } };
+    sub._timer = { destroy: async () => { counts.timer++; } };
+    sub._subscriptionKey = 'key';
+    sub._subscription = { suspend: async () => { counts.suspend++; }, destroy: async () => { counts.destroy++; } };
+    await Promise.all([retain ? sub.suspend() : sub.destroy(), sub.destroy()]);
+    assert.deepEqual(counts, { service: 1, timer: 1, unsubscribe: retain ? 0 : 1,
+      suspend: retain ? 1 : 0, destroy: retain ? 0 : 1 });
+  }
+});
+
+test('failed durable consumer removal remains retryable', async () => {
+  let calls = 0;
+  const sub = new StreamSubscription({ telemetry: telemetry(), name: 'consumer',
+    ref: { stream: 'stream', subject: 'events' }, callback: async () => {}, core: {
+      jsm: { consumers: { delete: async () => { if (++calls === 1) throw Error('temporary API failure'); } } },
+    } });
+  sub._info = { stream_name: 'stream', name: 'consumer' };
+  await assert.rejects(sub.destroy(), /temporary API failure/);
+  await sub.destroy(); await sub.destroy();
+  assert.equal(calls, 2);
+});
+
+test('stream restoration retains the old durable consumer instead of deleting pending work', async () => {
+  const streams = [];
+  let callbacks;
+  const sub = new SubscriptionImpl({ telemetry: telemetry(), name: 'consumer',
+    trigger: { name: 'trigger' }, params: {}, callback: async () => {}, core: {
+      options: { heartbeatInterval: 1000 },
+      call: async () => ({ stream: { stream: 'stream', subject: 'events' }, key: 'same-key' }),
+      stream: { subscribe: async (_telemetry, _name, _ref, _callback, options) => {
+        const stream = { suspended: 0, deleted: 0,
+          async suspend() { this.suspended++; }, async destroy() { this.deleted++; } };
+        streams.push(stream); callbacks = options;
+        return stream;
+      } },
+      localTimer: async () => ({ destroy: async () => {} }),
+      service: async () => ({ method: async () => {}, destroy: async () => {} }),
+    } });
+  await sub.init();
+  callbacks.error(Error('iterator interrupted'));
+  await sub._restore;
+  assert.equal(streams.length, 2);
+  assert.equal(streams[0].suspended, 1);
+  assert.equal(streams[0].deleted, 0);
+  assert.equal(sub._subscriptionBroken, false);
+  await sub.destroy();
+  assert.equal(streams[1].deleted, 1);
+});
+
+test('explicit parameter dispatch deduplicates subjects and propagates publish failure', async () => {
+  const published = [], states = new Map();
+  let fail = true;
+  const trigger = new TriggerImpl({ telemetry: telemetry(), name: 'trigger', core: {
+    mutex: () => ({ lock: async callback => callback() }),
+    registry: { cell: key => ({ mutate: async callback => callback(states.get(key), async value => { states.set(key, value); }) }) },
+  }, runner: async ({ params, reduce, publish }) => async input => {
+    await reduce(async (previous = 0, write) => { await write(previous + 1); });
+    await publish({ input, params });
+  }, tester: async value => value });
+  trigger._stream = { publishToSubject: async (key, value) => {
+    if (fail) throw Error('publish rejected');
+    published.push({ key, value });
+  } };
+  const params = [{ wallet: 'a' }, { wallet: 'a' }, { wallet: 'b' }];
+  await assert.rejects(trigger.executeForParams(1, params), /publish rejected/);
+  fail = false;
+  await trigger.executeForParams(1, params);
+  assert.deepEqual(published.map(item => item.key).sort(), [hashOf(params[0]), hashOf(params[2])].sort());
+  assert.equal(states.size, 2);
+  await trigger.executeForParams(2, []);
+  assert.equal(published.length, 2);
+});

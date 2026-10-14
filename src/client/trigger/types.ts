@@ -69,6 +69,11 @@ export type TriggerLifecycleHooks<P = unknown> = {
 
 export type Trigger<D extends TriggerDefinition> = {
   execute(input: InferTriggerInput<D>): Promise<void>;
+  /** Publish accepted work to explicit parameter-derived subjects, even after
+   * unsubscribe. Does not create tasks or renew demand. Parameters and retry
+   * policy belong to the caller; delivery remains at-least-once.
+   */
+  executeForParams(input: InferTriggerInput<D>, params: readonly InferTriggerParams<D>[]): Promise<void>;
   test(test: InferTriggerTest<D>, params: InferTriggerParams<D>): Promise<InferTriggerOutput<D>[]>;
   ref: TriggerRef<D>;
 };

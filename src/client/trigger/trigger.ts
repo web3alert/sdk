@@ -21,6 +21,7 @@ import {
   type Trigger,
   type TriggerRunner,
   type TriggerTester,
+  type TriggerExecuteCallback,
 } from './types';
 
 export type TriggerState = {
@@ -197,30 +198,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
             
             this._telemetry.debug({ key, value }, 'spawn task');
             
-            const mutex = this._core.mutex(`${this._name}.data.tasks.${key}.mutex`);
-            const state = this._core.registry.cell(`${this._name}.data.tasks.${key}.state`);
-            
-            const execute = await this._runner({
-              params: value.params,
-              reduce: async callback => {
-                let result: any;
-                
-                await mutex.lock(async () => {
-                  await state.mutate(async (prev, write) => {
-                    result = await callback(prev as any, write as any);
-                  });
-                });
-                
-                return result;
-              },
-              publish: async output => {
-                const items = Array.isArray(output) ? output : [output];
-                
-                for (const item of items) {
-                  await this._stream.publishToSubject(key, item);
-                }
-              },
-            });
+            const execute = await this._taskExecutor(key, value.params);
             
             return await this._emitter.listen(execute);
           },
@@ -424,6 +402,42 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   
   public async execute(input: InferTriggerInput<D>): Promise<void> {
     await this._emitter.publish(input);
+  }
+
+  public async executeForParams(
+    input: InferTriggerInput<D>,
+    params: readonly InferTriggerParams<D>[],
+  ): Promise<void> {
+    const tasks = new Map(params.map(value => [hashOf(value), value]));
+    for (const [key, value] of tasks) {
+      const execute = await this._taskExecutor(key, value);
+      await execute(input);
+    }
+  }
+
+  private async _taskExecutor(
+    key: string,
+    params: InferTriggerParams<D>,
+  ): Promise<TriggerExecuteCallback<InferTriggerInput<D>>> {
+    const mutex = this._core.mutex(`${this._name}.data.tasks.${key}.mutex`);
+    const state = this._core.registry.cell(`${this._name}.data.tasks.${key}.state`);
+    return await this._runner({
+      params,
+      reduce: async callback => {
+        let result: any;
+        await mutex.lock(async () => {
+          await state.mutate(async (prev, write) => {
+            result = await callback(prev as any, write as any);
+          });
+        });
+        return result;
+      },
+      publish: async output => {
+        for (const item of Array.isArray(output) ? output : [output]) {
+          await this._stream.publishToSubject(key, item);
+        }
+      },
+    });
   }
   
   public async test(

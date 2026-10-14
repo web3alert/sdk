@@ -53,5 +53,19 @@ jobs:
       - name: Verify package
         run: npm run verify:package --if-present
 
+      - name: Setup Go for isolated transport tests
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Install native NATS test server
+        run: |
+          go install github.com/nats-io/nats-server/v2@v2.10.18
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify durable transport against real JetStream
+        run: npm run test:transport
+
       - name: Inspect package contents
         run: npm pack --dry-run
