@@ -16,6 +16,32 @@ function telemetry() {
     warn: noop, error: noop, debug: noop, info: noop, destroy: noop };
 }
 
+test('shutdown consumes the NATS stop sentinel behind buffered items without dispatching them', { timeout: 2000 }, async () => {
+  const stopped = deferred(), closed = deferred(), first = deferred();
+  let dispatched = 0;
+  const messages = {
+    // Real nats 2.x stop queues completion in its iterator, rather than
+    // resolving closed immediately. Returning early strands that completion.
+    stop() { stopped.resolve(); },
+    closed: () => closed.promise,
+    async *[Symbol.asyncIterator]() {
+      yield {};
+      await stopped.promise;
+      yield {}; // already buffered when suspension starts
+      closed.resolve();
+    },
+  };
+  const sub = new StreamSubscription({ telemetry: telemetry(), core: {
+    jsm: { consumers: { add: async () => ({ stream_name: 'stream', name: 'consumer' }) } },
+    js: { consumers: { get: async () => ({ fetch: async () => messages }) } },
+    uncaughtException: error => { throw error; },
+  }, name: 'consumer', ref: { stream: 'stream', subject: 'events' }, callback: async () => {} });
+  sub._handleMessage = async () => { dispatched++; first.resolve(); };
+  await sub.init(); await first.promise;
+  await sub.suspend();
+  assert.equal(dispatched, 1, 'buffered tail must remain unacknowledged for redelivery');
+});
+
 test('shutdown stops an iterator whose fetch resolves after shutdown began', { timeout: 2000 }, async () => {
   const fetched = deferred(), started = deferred(), closed = deferred();
   let stopped = 0, deleted = 0;

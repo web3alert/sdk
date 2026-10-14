@@ -1,7 +1,7 @@
 import { type BaseClientStackParams, BaseClientStack } from './base-client';
 import { Namespace } from '../namespace';
 import { type ActionInput, type EventCallback } from './types';
-import { type StreamSubscriptionOptions } from '../stream';
+import { type StreamOptions, type StreamSubscriptionOptions } from '../stream';
 import { ClientLocal } from './local';
 import { Refs } from './refs';
 import { type SequenceCallback, type SequencerOptions, Sequencer } from './sequencer';
@@ -34,6 +34,7 @@ export type ClientTriggerParams<D extends TriggerDefinition> = {
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
   hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
+  streamOptions?: Partial<StreamOptions>;
 };
 
 export type ClientSubscribeOptions = Pick<Partial<StreamSubscriptionOptions>, 'concurrency'>;
@@ -175,6 +176,7 @@ export class Client extends BaseClientStack {
       runner,
       tester,
       hooks,
+      streamOptions,
     } = params;
     
     return this._use(async () => {
@@ -185,6 +187,7 @@ export class Client extends BaseClientStack {
         runner,
         tester,
         hooks,
+        streamOptions,
       });
       await trigger.init();
       

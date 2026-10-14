@@ -175,3 +175,131 @@ test('accepted parameter dispatch works after unsubscribe without creating deman
     finally { await f.close(); }
   }
 });
+
+for (const retain of [true, false]) test(`${retain ? 'suspension' : 'removal'} with a full fetch buffer completes without dispatching its tail`, { timeout: 45000 }, async () => {
+  const f = await fixture(); let app, publisher, consumer, unblock;
+  const held = new Promise(resolve => { unblock = resolve; });
+  try {
+    app = await f.open(); publisher = await app.client('source', {}, { detach: true });
+    const trigger = await publisher.trigger({ name: 'events', tester: async input => input,
+      runner: async ({ publish }) => async input => publish({ input }) });
+    consumer = await app.client('reader', {}, { detach: true });
+    const received = [];
+    const sub = await consumer.subscribe({ name: 'events', trigger: trigger.ref, params: {}, options: { concurrency: 1 },
+      callback: async value => { received.push(value.input); await held; } });
+    for (let input = 0; input < 300; input++) await trigger.executeForParams(input, [{}]);
+    await until(() => received.length, count => count === 1, 'blocked first callback');
+    const stream = 'trigger_test_source_events_events';
+    const name = 'test_reader_events_' + hashOf({});
+    const original = await until(() => publisher.core.jsm.consumers.info(stream, name), info => info.num_ack_pending === 101, 'real backpressured fetch');
+    const closing = retain ? sub.suspend() : sub.destroy();
+    unblock();
+    await bounded(closing, 'suspend buffered iterator');
+    await bounded(consumer.destroy(), 'suspended client teardown'); consumer = undefined;
+    if (!retain) {
+      await assert.rejects(publisher.core.jsm.consumers.info(stream, name), error => error.code === '404');
+      assert.deepEqual(f.errors, []);
+      return;
+    }
+    const retained = await publisher.core.jsm.consumers.info(stream, name);
+    assert.equal(retained.created, original.created);
+    assert.ok(retained.num_ack_pending + retained.num_pending > 0, 'unhandled tail must remain pending');
+    assert.ok(received.length < 300, 'test must actually suspend before consuming the tail');
+    consumer = await app.client('reader', {}, { detach: true });
+    await consumer.subscribe({ name: 'events', trigger: trigger.ref, params: {}, callback: async value => { received.push(value.input); } });
+    // Buffered, never-dispatched records were not ACKed. Request immediate
+    // redelivery using the existing durable consumer's normal ACK timeout.
+    await publisher.core.jsm.consumers.update(stream, name, { ack_wait: 200_000_000 });
+    await until(() => new Set(received).size, size => size === 300, 'complete retained tail', 15000);
+    assert.deepEqual([...new Set(received)].sort((a, b) => a - b), Array.from({ length: 300 }, (_, i) => i));
+    assert.deepEqual(f.errors, []);
+  } finally {
+    unblock();
+    try { if (consumer) await bounded(consumer.destroy(), 'consumer cleanup');
+      if (publisher) await bounded(publisher.destroy(), 'publisher cleanup');
+      if (app) await bounded(app.destroy(), 'app cleanup'); }
+    finally { await f.close(); }
+  }
+});
+
+test('stop during a real buffered JetStream fetch reaches closed and redelivers the unhandled records', { timeout: 45000 }, async () => {
+  const f = await fixture(); let app, publisher, transport;
+  try {
+    app = await f.open(); publisher = await app.client('source', {}, { detach: true });
+    const trigger = await publisher.trigger({ name: 'events', tester: async input => input,
+      runner: async ({ publish }) => async input => publish({ input }) });
+    const ref = { stream: 'trigger_test_source_events_events', subject: 'trigger.test.source.events.events' };
+    const name = 'buffered_reader';
+    await publisher.core.jsm.consumers.add(ref.stream, {
+      durable_name: name, deliver_policy: 'new', ack_policy: 'explicit',
+    });
+    for (let input = 0; input < 100; input++) await trigger.executeForParams(input, [{}]);
+    const before = await publisher.core.jsm.consumers.info(ref.stream, name);
+    assert.equal(before.num_pending, 100);
+    const received = []; let closing;
+    transport = await publisher.core.stream.subscribe(publisher.telemetry.child('first-buffered-reader'), name, ref, async message => {
+      received.push(message.data.input);
+      closing ??= transport.suspend(); // abort inside the first batch, no await cycle
+    }, { concurrency: 1, batchSize: 100 });
+    await until(() => Boolean(closing), Boolean, 'first buffered callback');
+    await bounded(closing, 'iterator stop sentinel');
+    const after = await publisher.core.jsm.consumers.info(ref.stream, name);
+    assert.equal(after.created, before.created);
+    assert.ok(after.num_ack_pending > 0, 'already fetched but unhandled records remain unACKed');
+    assert.ok(received.length < 100);
+    transport = await publisher.core.stream.subscribe(publisher.telemetry.child('resumed-buffered-reader'), name, ref, async message => {
+      received.push(message.data.input);
+    }, { concurrency: 1 });
+    await publisher.core.jsm.consumers.update(ref.stream, name, { ack_wait: 200_000_000 });
+    await until(() => new Set(received).size, size => size === 100, 'all unACKed buffered records redelivered');
+    assert.equal((await publisher.core.jsm.consumers.info(ref.stream, name)).created, before.created);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    try { if (transport) await bounded(transport.destroy(), 'transport cleanup');
+      if (publisher) await bounded(publisher.destroy(), 'publisher cleanup');
+      if (app) await bounded(app.destroy(), 'app cleanup'); }
+    finally { await f.close(); }
+  }
+});
+
+test('per-trigger retention survives restart, rejects overflow and never evicts pending messages', { timeout: 45000 }, async () => {
+  const f = await fixture(); let app, publisher, consumer;
+  try {
+    app = await f.open(); publisher = await app.client('source', {}, { detach: true });
+    const args = { name: 'retained', streamOptions: { maxAge: 0, maxMessages: 2 },
+      tester: async input => input, runner: async ({ publish }) => async input => publish({ input }) };
+    let trigger = await publisher.trigger(args);
+    const stream = 'trigger_test_source_retained_events';
+    const ordinary = await publisher.trigger({ ...args, name: 'ordinary', streamOptions: undefined });
+    assert.equal((await publisher.core.jsm.streams.info('trigger_test_source_ordinary_events')).config.max_age, 2 * 60 * 60 * 1e9);
+    consumer = await app.client('reader', {}, { detach: true });
+    const sub = await consumer.subscribe({ name: 'events', trigger: trigger.ref, params: {}, callback: async () => {} });
+    await sub.suspend(); await consumer.destroy(); consumer = undefined;
+    await trigger.executeForParams(1, [{}]); await trigger.executeForParams(2, [{}]);
+    await assert.rejects(trigger.executeForParams(3, [{}]), error => error.api_error?.err_code === 10077);
+    await publisher.destroy(); publisher = undefined;
+    publisher = await app.client('source', {}, { detach: true });
+    trigger = await publisher.trigger(args);
+    const info = await publisher.core.jsm.streams.info(stream);
+    assert.equal(info.config.max_age, 0);
+    assert.equal(info.config.discard, 'new');
+    assert.equal(info.config.max_msgs, 2);
+    assert.ok(info.config.max_bytes > 0, 'retention must remain size-bounded');
+    assert.equal(info.state.messages, 2);
+    const received = [];
+    consumer = await app.client('reader', {}, { detach: true });
+    await consumer.subscribe({ name: 'events', trigger: trigger.ref, params: {}, callback: async value => { received.push(value.input); } });
+    await until(() => received, values => values.length === 2, 'original retained payloads');
+    assert.deepEqual(received, [1, 2]);
+    await until(() => publisher.core.jsm.streams.info(stream), value => value.state.messages === 0, 'ACK frees capacity');
+    await trigger.executeForParams(3, [{}]);
+    await until(() => received, values => values.length === 3, 'publication resumes after ACK');
+    void ordinary;
+    assert.deepEqual(f.errors, []);
+  } finally {
+    try { if (consumer) await bounded(consumer.destroy(), 'consumer cleanup');
+      if (publisher) await bounded(publisher.destroy(), 'publisher cleanup');
+      if (app) await bounded(app.destroy(), 'app cleanup'); }
+    finally { await f.close(); }
+  }
+});

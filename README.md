@@ -446,6 +446,14 @@ The owner must explicitly clean retained resources when a suspended subscription
 is permanently removed. Task leases still expire normally; suspension does not
 renew demand indefinitely. Stream size/age limits still apply.
 
+For a durable outbox, pass `streamOptions: { maxAge: 0 }` to `client.trigger()`.
+This disables expiry only for that trigger. The default `DiscardPolicy.New`,
+100 MiB byte limit and 100,000 message limit remain: a full stream rejects the
+new publication, leaving pending messages intact. Its owner must retry/backpressure
+and clean up permanently retired consumers. Keep the same options on restart;
+the default trigger policy still expires messages after two hours. Retention is
+interest-based, so removing the last durable consumer still releases its messages.
+
 `await trigger.executeForParams(input, acceptedParams)` dispatches previously
 accepted work using the same parameter-derived subjects and reducer state as
 normal execution, even if its task has since unsubscribed. Duplicate parameter

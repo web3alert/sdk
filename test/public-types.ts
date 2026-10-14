@@ -10,6 +10,7 @@ import {
   type HttpAgentRequestParams,
   type Subscription,
   type Trigger,
+  type ClientTriggerParams,
 } from '../dist';
 
 declare const source: Awaited<ReturnType<ClientLocal['blockchain']>>;
@@ -23,6 +24,12 @@ declare const subscription: Subscription<SampleTrigger>;
 declare const trigger: Trigger<SampleTrigger>;
 void subscription.suspend();
 void trigger.executeForParams(1, [{ wallet: '0x1' }]);
+const retainedTrigger: ClientTriggerParams<SampleTrigger> = {
+  name: 'retained', streamOptions: { maxAge: 0, maxMessages: 1000 },
+  runner: async ({ publish }) => async value => publish({ value }),
+  tester: async () => [],
+};
+void retainedTrigger;
 // @ts-expect-error explicit dispatch retains the trigger's parameter contract
 void trigger.executeForParams(1, [{ wallet: 42 }]);
 

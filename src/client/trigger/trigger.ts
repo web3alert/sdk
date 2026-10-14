@@ -3,7 +3,7 @@ import { type Timer } from '../../timer';
 import { setup, oneshot, hashOf } from '../../utils';
 import { type Service } from '../../service';
 import { type Core } from '../../core';
-import { type StreamRef, Stream } from '../../stream';
+import { type StreamRef, type StreamOptions, Stream } from '../../stream';
 import { type BucketSlice, type BucketCell } from '../../bucket';
 import { type MutexCell } from '../../multimutex';
 import { getNumber } from '../../env';
@@ -95,6 +95,7 @@ export type TriggerImplParams<D extends TriggerDefinition> = {
   runner: TriggerRunner<D>;
   tester: TriggerTester<D>;
   hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
+  streamOptions?: Partial<StreamOptions>;
 };
 
 export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
@@ -104,6 +105,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
   private _runner: TriggerRunner<D>;
   private _tester: TriggerTester<D>;
   private _hooks?: TriggerLifecycleHooks<InferTriggerParams<D>>;
+  private _streamOptions?: Partial<StreamOptions>;
   private _emitter!: Emitter<InferTriggerInput<D>>;
   private _stream!: Stream<InferTriggerOutput<D>>;
   private _tasks!: BucketSlice<TriggerTask<InferTriggerParams<D>>>;
@@ -130,6 +132,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
     this._runner = runner;
     this._tester = tester;
     this._hooks = hooks;
+    this._streamOptions = params.streamOptions;
     
     this.init = this._telemetry.wrap('init', this.init);
     this.destroy = this._telemetry.wrap('destroy', this.destroy);
@@ -146,6 +149,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
           name: `trigger.${this._name}.events`,
           options: {
             maxSize: triggerStreamMaxBytes(),
+            ...this._streamOptions,
           },
         });
         await stream.init();

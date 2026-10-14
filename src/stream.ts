@@ -596,7 +596,11 @@ export class StreamSubscription<T> {
           await this._waitForQueueCapacity();
 
           if (this._terminator.signal.aborted) {
-            break;
+            // nats 2.x stop() queues its completion behind buffered messages.
+            // Breaking calls iterator.return(), which queues another stop but
+            // leaves closed() unresolved. Consume the remaining iterator only
+            // to reach that completion; do not dispatch or ACK these messages.
+            continue;
           }
 
           void this._queue.push(message);
