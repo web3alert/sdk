@@ -111,13 +111,14 @@ export class Client extends BaseClientStack {
     
     this.action = name => ({
       params: () => ({
-        callback: async callback => {
+        callback: async (callback, options) => {
           return this._use(async () => {
             const action = new Action({
               telemetry: this.telemetry.child(`action.${name}`),
               core: this.core,
               name: `${this.namespace.workspace}.${this.namespace.project}.${name}`,
               callback,
+              options,
             });
             await action.init();
             
@@ -137,7 +138,8 @@ export class Client extends BaseClientStack {
   }
   
   public async execute<P>(action: ActionRef<P>, input: ActionInput<P>): Promise<void> {
-    const fun = this.ref.fun(`${action.name}.fun`)
+    // A distinct subject prevents an old sender silently ignoring the fence.
+    const fun = this.ref.fun(`${action.name}${input.delivery ? '.guarded' : ''}.fun`)
       .params<ActionInput<P>>()
       .result<void>()
     ;

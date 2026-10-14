@@ -46,8 +46,8 @@
   "scripts": {
     "build": "npm run clean && tsc",
     "clean": "rm -rf dist",
-    "test": "npm run build && npm run test:types && node --test test/public-entrypoint.test.cjs test/idle-head-subscriptions.test.cjs test/retained-transport.test.cjs",
-    "test:transport": "node --test test/retained-transport.integration.cjs",
+    "test": "npm run build && npm run test:types && node --test test/public-entrypoint.test.cjs test/idle-head-subscriptions.test.cjs test/retained-transport.test.cjs test/action-delivery.test.cjs",
+    "test:transport": "node --test test/retained-transport.integration.cjs test/action-delivery.integration.cjs",
     "test:types": "tsc -p tsconfig.test.json",
     "verify:package": "node scripts/verify-package.cjs",
     "prepublishOnly": "npm test && npm run verify:package"

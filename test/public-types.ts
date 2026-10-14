@@ -11,7 +11,14 @@ import {
   type Subscription,
   type Trigger,
   type ClientTriggerParams,
+  type Client,
+  type ActionDeliveryContext,
 } from '../dist';
+
+declare const client: Client;
+void client.action('send').params<{ url: string }>().callback(async (input, delivery: ActionDeliveryContext) => {
+  await delivery.start(() => fetch(input.params.url));
+}, { guardedDelivery: true });
 
 declare const source: Awaited<ReturnType<ClientLocal['blockchain']>>;
 const pause: Promise<void> = source.setHeadSubscriptionActive(false);
