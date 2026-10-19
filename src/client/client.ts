@@ -51,6 +51,7 @@ export type ClientCronParams = {
   name: string;
   expression: string;
   callback: CronCallback;
+  catchUp?: boolean;
 };
 
 export type ClientReducerParams<T> = {
@@ -240,6 +241,7 @@ export class Client extends BaseClientStack {
         name: `${this.namespace.workspace}.${this.namespace.project}.${name}`,
         expression,
         callback,
+        catchUp: params.catchUp,
       });
       await cron.init();
       
