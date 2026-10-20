@@ -367,6 +367,8 @@ export class StreamSubscription<T> {
   private _loop!: Promise<void>;
   private _loopError?: unknown;
   private _close?: Promise<void>;
+  private _pendingMessages = new Set<JsMsg>();
+  private _pendingLeaseTimer?: NodeJS.Timeout;
 
   private _gaugeLastConsumedSeq: Gauge;
 
@@ -458,6 +460,34 @@ export class StreamSubscription<T> {
     }, { ref: this._ref, name: this._name, handler: 'messages' });
   }
 
+  private _trackPendingMessage(message: JsMsg): void {
+    this._pendingMessages.add(message);
+    if (this._pendingLeaseTimer) return;
+    // JetStream's ACK deadline starts at fetch, not when a queued callback
+    // begins. Renew queued AND running work; never ACK before completion.
+    const ackWaitMs = (this._info.config?.ack_wait ?? 30_000_000_000) / 1_000_000;
+    const interval = Math.max(1, Math.min(10_000, Math.floor(ackWaitMs / 3)));
+    this._pendingLeaseTimer = setInterval(() => {
+      for (const pending of this._pendingMessages) {
+        try { pending.working(); }
+        catch (cause) {
+          this._core.warn(new Web3alertError('pending message lease renewal failed', {
+            cause, details: { ref: this._ref, name: this._name, sequence: pending.seq },
+          }));
+        }
+      }
+    }, interval);
+    this._pendingLeaseTimer.unref();
+  }
+
+  private _releasePendingMessage(message: JsMsg): void {
+    this._pendingMessages.delete(message);
+    if (this._pendingMessages.size === 0) {
+      clearInterval(this._pendingLeaseTimer);
+      this._pendingLeaseTimer = undefined;
+    }
+  }
+
   public async init(): Promise<void> {
     await setup(async use => {
       const name = this._name.replaceAll('.', '_');
@@ -528,6 +558,10 @@ export class StreamSubscription<T> {
     if (this._queue) {
       await this._queue.drained();
     }
+    // Suspension keeps renewing accepted callbacks until their real work
+    // finishes. Unhandled broker/iterator buffers were never tracked.
+    clearInterval(this._pendingLeaseTimer);
+    this._pendingLeaseTimer = undefined;
 
     if (this._info && !retainConsumer) {
       try {
@@ -603,7 +637,14 @@ export class StreamSubscription<T> {
             continue;
           }
 
-          void this._queue.push(message);
+          this._trackPendingMessage(message);
+          void this._queue.push(message).then(
+            () => this._releasePendingMessage(message),
+            error => {
+              this._releasePendingMessage(message);
+              this._core.uncaughtException(error);
+            },
+          );
         }
       } catch (err) {
         streamErr = err;
