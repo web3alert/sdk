@@ -16,6 +16,24 @@ function telemetry() {
     warn: noop, error: noop, debug: noop, info: noop, destroy: noop };
 }
 
+test('expired task retention checks exact durable subscriber and subject, failing closed on broker errors',async()=>{
+  let consumers=[];
+  const trigger=new TriggerImpl({telemetry:telemetry(),name:'trigger',core:{jsm:{consumers:{list:()=>({
+    async *[Symbol.asyncIterator](){for(const value of consumers){if(value instanceof Error)throw value;yield value}}
+  })}}},runner:()=>{},tester:()=>{}});
+  trigger._stream={ref:{stream:'stream',subject:'trigger.events'}};
+  const c=(name,filter='trigger.events.key')=>({config:{durable_name:name,filter_subject:filter}});
+  consumers=[c('reader_key')];assert.equal(await trigger._hasDurableSubscriber('key','reader'),true);
+  assert.equal(await trigger._hasDurableSubscriber('key','other'),false);
+  consumers=[c('reader_key','trigger.events.other')];assert.equal(await trigger._hasDurableSubscriber('key','reader'),false);
+  consumers=[c('reader_key','trigger.events.*')];assert.equal(await trigger._hasDurableSubscriber('key','reader'),true);
+  consumers=[c('reader_key','trigger.>')];assert.equal(await trigger._hasDurableSubscriber('key','reader'),true);
+  consumers=[{config:{durable_name:'reader_key',filter_subjects:['unrelated','trigger.events.key']}}];
+  assert.equal(await trigger._hasDurableSubscriber('key','reader'),true);
+  consumers=[];assert.equal(await trigger._hasDurableSubscriber('key','reader'),false);
+  consumers=[new Error('broker unavailable')];await assert.rejects(trigger._hasDurableSubscriber('key','reader'),/broker unavailable/);
+});
+
 test('shutdown consumes the NATS stop sentinel behind buffered items without dispatching them', { timeout: 2000 }, async () => {
   const stopped = deferred(), closed = deferred(), first = deferred();
   let dispatched = 0;

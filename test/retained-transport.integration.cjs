@@ -6,7 +6,7 @@ const { mkdtemp, rm } = require('node:fs/promises');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { connect, createTelemetry } = require('../dist');
+const { connect, createTelemetry } = require(process.env.W3A_TASK_BASELINE_ROOT || '../dist');
 const { hashOf } = require('../dist/utils');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -46,6 +46,29 @@ async function fixture() {
     options: { heartbeatInterval: 1000 }, uncaughtException: error => { errors.push(error); } });
   return { open, close, errors };
 }
+
+test('expired heartbeat retains source tasks while their durable consumer survives', { timeout: 45000 }, async()=>{
+  const f=await fixture();let app,publisher,reader;
+  try {
+    app=await f.open();publisher=await app.client('source',{}, {detach:true});
+    const trigger=await publisher.trigger({name:'lease-events',tester:async x=>x,
+      runner:async({publish})=>async input=>publish({input})});
+    reader=await app.client('reader',{}, {detach:true});
+    const sub=await reader.subscribe({name:'lease',trigger:trigger.ref,params:{},callback:async()=>{}});
+    await sub.suspend();await reader.destroy();reader=undefined;
+    // More than two cleanup windows and the real four-heartbeat expiry.
+    // No subscriber heartbeat, no fake demand, no manual renewal or ACK.
+    for(let i=0;i<9;i++){await trigger.execute(i);await sleep(1000);}
+    const task=await publisher.core.registry.get(`${trigger.ref.name}.tasks.${hashOf({})}`);
+    assert.ok(task,'heartbeat expiry deleted a still-owned task');
+    const received=[];reader=await app.client('reader',{}, {detach:true});
+    await reader.subscribe({name:'lease',trigger:trigger.ref,params:{},callback:async value=>received.push(value.input)});
+    await until(()=>received,x=>x.length===9,'all inputs survive delayed recovery');
+    assert.deepEqual(received,[0,1,2,3,4,5,6,7,8]);
+    await reader.destroy();reader=undefined;
+    assert.equal(await publisher.core.registry.get(`${trigger.ref.name}.tasks.${hashOf({})}`),undefined,'real unsubscribe still removes demand');
+  }finally{try{await reader?.destroy();await publisher?.destroy();await app?.destroy()}finally{await f.close()}}
+});
 
 test('durable pending and backlog survive whole-client restart; actual unsubscribe removes them', { timeout: 60000 }, async () => {
   const f = await fixture(); let app, publisher, consumer;

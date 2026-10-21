@@ -247,10 +247,13 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
               }
 
               if (task.subscribers) {
-                const subscribers = Object.fromEntries(
-                  Object.entries(task.subscribers)
-                    .filter(([, timestamp]) => now - new Date(timestamp).getTime() < timeout),
-                );
+                const subscribers: Record<string, string> = {};
+                for (const [subscriber, timestamp] of Object.entries(task.subscribers)) {
+                  if (now - new Date(timestamp).getTime() < timeout
+                    || await this._hasDurableSubscriber(fixedKey, subscriber)) {
+                    subscribers[subscriber] = timestamp;
+                  }
+                }
 
                 if (Object.keys(subscribers).length == 0) {
                   this._telemetry.debug({ key: fixedKey }, 'task evicted by hearbeat timeout');
@@ -268,7 +271,7 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
               
               const lastOnlineAt = new Date(task.timestamp).getTime();
               
-              if (now - lastOnlineAt < timeout) {
+              if (now - lastOnlineAt < timeout || await this._hasDurableSubscriber(fixedKey)) {
                 continue;
               }
               
@@ -390,6 +393,33 @@ export class TriggerImpl<D extends TriggerDefinition> implements Trigger<D> {
 
       await this._syncTasksActiveState();
     });
+  }
+
+  /** A missed heartbeat is not an unsubscribe. Durable consumers survive
+   * restart/suspension and still own their input, even while draining slowly.
+   * Preserve the original timestamp (do not fabricate demand/renew a lease).
+   * Failed broker inspection throws: uncertainty must never delete a task.
+   */
+  private async _hasDurableSubscriber(key: string, subscriber?: string): Promise<boolean> {
+    const { stream, subject } = this._stream.ref;
+    const expectedSubject = `${subject}.${key}`;
+    const expectedName = subscriber && subscriber !== 'default'
+      ? `${subscriber}.${key}`.replaceAll('.', '_') : undefined;
+    for await (const consumer of this._core.jsm.consumers.list(stream)) {
+      if (!consumer.config.durable_name) continue;
+      if (expectedName && consumer.config.durable_name !== expectedName) continue;
+      const filters = consumer.config.filter_subjects
+        ?? (consumer.config.filter_subject ? [consumer.config.filter_subject] : ['>']);
+      if (filters.some(filter => {
+        const parts = filter.split('.'), actual = expectedSubject.split('.');
+        for (let i = 0; i < parts.length; i++) {
+          if (parts[i] === '>') return i < actual.length;
+          if (actual[i] === undefined || (parts[i] !== '*' && parts[i] !== actual[i])) return false;
+        }
+        return parts.length === actual.length;
+      })) return true;
+    }
+    return false;
   }
   
   public async destroy(): Promise<void> {
