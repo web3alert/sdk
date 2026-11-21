@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { NatsError } = require('nats');
+const { Core } = require('../dist/core');
 const { StreamSubscription } = require('../dist/stream');
 const { SubscriptionImpl } = require('../dist/client/subscription/subscription');
 const { TriggerImpl } = require('../dist/client/trigger/trigger');
@@ -15,6 +17,138 @@ function telemetry() {
   return { wrap: (_, fn) => fn, child: telemetry, gauge: () => ({ set: noop }),
     warn: noop, error: noop, debug: noop, info: noop, destroy: noop };
 }
+
+function subscribeToStream(consumers, options) {
+  const core = new Core({ telemetry: telemetry(), uncaughtException: error => { throw error; } });
+  core.jsm = { consumers };
+  const closed = deferred();
+  const messages = {
+    stop: closed.resolve,
+    closed: () => closed.promise,
+    async *[Symbol.asyncIterator]() { await closed.promise; },
+  };
+  core.js = { consumers: { get: async () => ({ fetch: async () => messages }) } };
+  return core.stream.subscribe(telemetry(), 'retry.reader', { stream: 'stream', subject: 'events' }, async () => {}, options);
+}
+
+function consumerError(code, err_code, message) {
+  const error = new NatsError(message, code);
+  error.api_error = { err_code };
+  return error;
+}
+
+test('stream consumer config sends max_ack_pending only when configured', async () => {
+  const requests = [];
+  let lookups = 0;
+  const consumers = {
+    async info() {
+      lookups++;
+      throw consumerError('404', 10014, 'consumer not found');
+    },
+    async add(stream, config) {
+      requests.push({ stream, config });
+      return { stream_name: stream, name: config.durable_name, config };
+    },
+  };
+  const config = {
+    ack_policy: 'explicit', deliver_policy: 'new', durable_name: 'retry_reader', filter_subject: 'events.retry',
+  };
+  for (const options of [{ filter: 'retry' }, ...[1, 20_000, 1_000_000].map(maxAckPending => ({ filter: 'retry', maxAckPending }))]) {
+    const sub = await subscribeToStream(consumers, options);
+    await sub.suspend();
+  }
+  assert.deepEqual(requests, [
+    { stream: 'stream', config },
+    { stream: 'stream', config: { ...config, max_ack_pending: 1 } },
+    { stream: 'stream', config: { ...config, max_ack_pending: 20_000 } },
+    { stream: 'stream', config: { ...config, max_ack_pending: 1_000_000 } },
+  ]);
+  assert.equal(lookups, 3);
+});
+
+test('only the pending-ack limit changes on an existing durable consumer', async () => {
+  const conflict = consumerError('400', 10148, 'consumer already exists');
+  let missingOnRead = false;
+  let updates = 0;
+  const existing = {
+    stream_name: 'stream', name: 'retry_reader', config: {
+      ack_policy: 'explicit', deliver_policy: 'new', durable_name: 'retry_reader',
+      filter_subject: 'events.retry', max_ack_pending: 1000, ack_wait: 60_000_000_000,
+    },
+  };
+  const consumers = {
+    async add() { throw conflict; },
+    async info(stream, name) {
+      assert.deepEqual([stream, name], ['stream', 'retry_reader']);
+      if (missingOnRead) {
+        missingOnRead = false;
+        throw consumerError('404', 10014, 'consumer not found');
+      }
+      return existing;
+    },
+    async update(stream, name, config) {
+      updates++;
+      assert.deepEqual([stream, name, config], ['stream', 'retry_reader', { max_ack_pending: 20_000 }]);
+      Object.assign(existing.config, config);
+      return existing;
+    },
+  };
+
+  for (const createdConcurrently of [false, true]) {
+    existing.config.max_ack_pending = 1000;
+    missingOnRead = createdConcurrently;
+    const sub = await subscribeToStream(consumers, { filter: 'retry', maxAckPending: 20_000 });
+    await sub.suspend();
+    assert.equal(existing.config.max_ack_pending, 20_000);
+    assert.equal(existing.config.ack_wait, 60_000_000_000);
+  }
+  const alreadyConfigured = await subscribeToStream(consumers, { filter: 'retry', maxAckPending: 20_000 });
+  await alreadyConfigured.suspend();
+  await assert.rejects(subscribeToStream(consumers, { filter: 'other', maxAckPending: 10_000 }), /conflicting subscription configuration/);
+  await assert.rejects(subscribeToStream(consumers, { filter: 'retry' }), error => error === conflict);
+  assert.equal(existing.config.max_ack_pending, 20_000);
+  assert.equal(updates, 2);
+});
+
+test('stream subscription rejects a different filter returned by the pending-ack update', async () => {
+  const existing = {
+    stream_name: 'stream', name: 'retry_reader', config: {
+      ack_policy: 'explicit', deliver_policy: 'new', durable_name: 'retry_reader',
+      filter_subject: 'events.retry', max_ack_pending: 1000,
+    },
+  };
+  let updates = 0;
+  const consumers = {
+    async info() { return existing; },
+    async update(stream, name, config) {
+      assert.deepEqual([stream, name, config], ['stream', 'retry_reader', { max_ack_pending: 20_000 }]);
+      updates++;
+      return { ...existing, config: { ...existing.config, ...config, filter_subject: 'events.other' } };
+    },
+  };
+  await assert.rejects(async () => {
+    const sub = await subscribeToStream(consumers, { filter: 'retry', maxAckPending: 20_000 });
+    await sub.suspend();
+  }, { message: 'JetStream consumer stream/retry_reader has a conflicting subscription configuration' });
+  assert.equal(updates, 1);
+});
+
+test('invalid pending-ack limits fail before calling JetStream', async () => {
+  let requests = 0;
+  const consumers = {
+    async add(stream, config) {
+      requests++;
+      return { stream_name: stream, name: config.durable_name, config };
+    },
+  };
+  for (const maxAckPending of [-1, 0, 1.5, 1_000_001, NaN, Infinity, '20', null]) {
+    await assert.rejects(async () => {
+      const sub = await subscribeToStream(consumers, { maxAckPending });
+      await sub.suspend();
+    }, /maxAckPending must be an integer between 1 and 1,000,000/);
+  }
+  assert.equal(requests, 0);
+});
 
 test('expired task retention checks exact durable subscriber and subject, failing closed on broker errors',async()=>{
   let consumers=[];

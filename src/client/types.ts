@@ -56,8 +56,20 @@ export type ProjectInfo = {
   title?: string;
 };
 
+export type ActionEvent = {
+  /** Delivery ID (`evt_` followed by 32 lowercase hex characters), stable across attempts. */
+  id: string;
+  /** `subscription.event` for a regular delivery or `subscription.test` for a test delivery. */
+  type: string;
+  /** ISO 8601 UTC time when the delivery was first built, stable across attempts. */
+  timestamp: string;
+  /** 1-based delivery attempt number. */
+  attempt: number;
+};
+
 export type ActionInput<P> = {
   delivery?: import('../action-delivery').ActionDeliveryRef;
+  event?: ActionEvent;
   workspace: string;
   subscription: string;
   trigger: TriggerInfo;

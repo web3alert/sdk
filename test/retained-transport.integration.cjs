@@ -47,6 +47,51 @@ async function fixture() {
   return { open, close, errors };
 }
 
+test('raising the pending-ack limit keeps parked work and delivers new messages', { timeout: 15000 }, async () => {
+  const f = await fixture();
+  let app, publisher, subscription;
+  try {
+    app = await f.open();
+    publisher = await app.client('source', {}, { detach: true });
+    const { core } = publisher;
+    const stream = await core.stream(publisher.telemetry.child('retry-stream'), 'retry');
+    const name = 'retry_reader';
+    const consumers = core.jsm.consumers;
+    const config = {
+      durable_name: name, deliver_policy: 'new', ack_policy: 'explicit',
+      max_ack_pending: 1, ack_wait: 60_000_000_000,
+    };
+    const initial = await consumers.add(stream.ref.stream, config);
+
+    await stream.publish({ id: 'parked' });
+    const consumer = await core.js.consumers.get(stream.ref.stream, name);
+    const parked = await consumer.next({ expires: 1000 });
+    assert.ok(parked);
+    parked.nak(60_000);
+    await core.nats.flush();
+    const info = () => consumers.info(stream.ref.stream, name);
+    assert.equal((await info()).num_ack_pending, 1);
+
+    const received = [];
+    subscription = await core.stream.subscribe(publisher.telemetry.child('retry-reader'), name, stream.ref,
+      async ({ data }) => { received.push(data.id); }, { maxAckPending: 20_000 });
+    const updated = await info();
+    assert.equal(updated.created, initial.created);
+    assert.deepEqual(updated.config, { ...initial.config, max_ack_pending: 20_000 });
+    assert.equal(updated.num_ack_pending, 1);
+    await stream.publish({ id: 'due' });
+    await until(() => received, items => items.length > 0, 'due retry delivery');
+    assert.deepEqual(received, ['due']);
+    assert.deepEqual(f.errors, []);
+  } finally {
+    try {
+      await subscription?.destroy();
+      await publisher?.destroy();
+      await app?.destroy();
+    } finally { await f.close(); }
+  }
+});
+
 test('expired heartbeat retains source tasks while their durable consumer survives', { timeout: 45000 }, async()=>{
   const f=await fixture();let app,publisher,reader;
   try {

@@ -195,6 +195,8 @@ export type StreamSubscriptionOptions = {
   concurrency: number;
   batchSize: number;
   fetchExpiresMs: number;
+  /** Maximum pending acknowledgements for the durable consumer, from 1 to 1,000,000. */
+  maxAckPending?: number;
   error: ErrorCallback;
 };
 
@@ -358,6 +360,7 @@ export class StreamSubscription<T> {
   private _concurrency: number;
   private _batchSize: number;
   private _fetchExpiresMs: number;
+  private _maxAckPending?: number;
   private _error?: ErrorCallback;
   private _info!: ConsumerInfo;
   private _consumer!: Consumer;
@@ -393,6 +396,7 @@ export class StreamSubscription<T> {
     this._concurrency = options?.concurrency ?? 1;
     this._batchSize = normalizeStreamSubscriptionBatchSize(options?.batchSize, this._concurrency);
     this._fetchExpiresMs = normalizeStreamSubscriptionFetchExpiresMs(options?.fetchExpiresMs);
+    this._maxAckPending = options?.maxAckPending;
     this._error = options?.error;
 
     this._gaugeLastConsumedSeq = this._telemetry.gauge({
@@ -488,16 +492,65 @@ export class StreamSubscription<T> {
     }
   }
 
+  private async _initConsumer(): Promise<ConsumerInfo> {
+    const maxAckPending = this._maxAckPending;
+    if (maxAckPending !== undefined && (!Number.isInteger(maxAckPending) || maxAckPending < 1 || maxAckPending > 1_000_000)) {
+      throw new RangeError('maxAckPending must be an integer between 1 and 1,000,000');
+    }
+
+    const name = this._name.replaceAll('.', '_');
+    const { stream, subject } = this._ref;
+    const filterSubject = this._filter ? `${subject}.${this._filter}` : undefined;
+    const { consumers } = this._core.jsm;
+    const config = {
+      ack_policy: AckPolicy.Explicit,
+      deliver_policy: DeliverPolicy.New,
+      durable_name: name,
+      filter_subject: filterSubject,
+    };
+    if (maxAckPending === undefined) {
+      return await consumers.add(stream, config);
+    }
+
+    // Older brokers treat create as an upsert. Read the current config before changing the limit.
+    let info = await consumers.info(stream, name).catch(err => {
+      if (!(err instanceof NatsError) || err.api_error?.err_code !== 10014) { // consumer not found
+        throw err;
+      }
+      return undefined;
+    });
+
+    if (!info) {
+      try {
+        return await consumers.add(stream, { ...config, max_ack_pending: maxAckPending });
+      } catch (err) {
+        if (!(err instanceof NatsError) || err.api_error?.err_code !== 10148) { // consumer already exists
+          throw err;
+        }
+        info = await consumers.info(stream, name);
+      }
+    }
+
+    const validateConsumer = ({ config: existing }: ConsumerInfo): void => {
+      if (existing.durable_name !== name || existing.deliver_subject
+        || existing.ack_policy !== config.ack_policy || existing.deliver_policy !== config.deliver_policy
+        || (existing.filter_subject || undefined) !== filterSubject || existing.filter_subjects?.length) {
+        throw new Error(`JetStream consumer ${stream}/${name} has a conflicting subscription configuration`);
+      }
+    };
+
+    validateConsumer(info);
+    if (info.config.max_ack_pending !== maxAckPending) {
+      info = await consumers.update(stream, name, { max_ack_pending: maxAckPending });
+      validateConsumer(info);
+    }
+
+    return info;
+  }
+
   public async init(): Promise<void> {
     await setup(async use => {
-      const name = this._name.replaceAll('.', '_');
-
-      const info = await this._core.jsm.consumers.add(this._ref.stream, {
-        ack_policy: AckPolicy.Explicit,
-        deliver_policy: DeliverPolicy.New,
-        durable_name: name,
-        filter_subject: (this._filter) ? `${this._ref.subject}.${this._filter}` : undefined,
-      });
+      const info = await this._initConsumer();
       this._info = info;
 
       this._consumer = await this._core.js.consumers.get(info.stream_name, info.name);

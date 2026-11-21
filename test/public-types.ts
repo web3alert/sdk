@@ -13,12 +13,32 @@ import {
   type ClientTriggerParams,
   type Client,
   type ActionDeliveryContext,
+  type ActionEvent,
+  type ActionInput,
 } from '../dist';
 
 declare const client: Client;
 void client.action('send').params<{ url: string }>().callback(async (input, delivery: ActionDeliveryContext) => {
   await delivery.start(() => fetch(input.params.url));
 }, { guardedDelivery: true });
+
+const actionEvent: ActionEvent = {
+  id: 'evt_0123456789abcdef0123456789abcdef',
+  type: 'subscription.event',
+  timestamp: '2026-11-21T00:00:00Z',
+  attempt: 1,
+};
+const actionInput: ActionInput<{ url: string }> = {
+  workspace: 'workspace',
+  subscription: 'subscription',
+  trigger: { name: 'Transfer', slug: 'transfer' },
+  project: { name: 'Project', slug: 'project' },
+  message: { short: 'Transfer' },
+  params: { url: 'https://example.test' },
+};
+const actionInputWithEvent: ActionInput<{ url: string }> = { ...actionInput, event: actionEvent };
+const receivedActionEvent: ActionEvent | undefined = actionInputWithEvent.event;
+void receivedActionEvent;
 
 declare const source: Awaited<ReturnType<ClientLocal['blockchain']>>;
 const pause: Promise<void> = source.setHeadSubscriptionActive(false);
