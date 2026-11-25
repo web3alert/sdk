@@ -1,6 +1,6 @@
 import { type Callback } from './types';
 import { defaults, anyway, retry, isWrongLastSequenceError } from './utils';
-import { type KV, ErrorCode, Events, NatsError, StorageType } from 'nats';
+import { type KV, type StreamInfo, ErrorCode, NatsError, StorageType } from 'nats';
 import { Web3alertError } from './errors';
 import { AutoabortableError } from './autoabortable';
 import { type Core } from './core';
@@ -22,7 +22,6 @@ export class MutexBucket {
   private _recovery?: Promise<void>;
   private _recoveryShutdown = new AbortController();
   private _bindOnly = false;
-  private _connectionEpoch = 0;
   
   constructor(params: MutexBucketParams) {
     const {
@@ -39,32 +38,35 @@ export class MutexBucket {
   
   public async init(): Promise<void> {
     this._kv = await this._open();
-    void this._trackDisconnects();
+    void this._core.nats.closed().then(() => this.destroy());
   }
 
-  private async _trackDisconnects(): Promise<void> {
-    try {
-      for await (const status of this._core.nats.status()) {
-        if (status.type === Events.Disconnect) {
-          this._connectionEpoch++;
-        }
-      }
-    } finally {
-      await this.destroy();
+  private _streamInfo(): Promise<StreamInfo> {
+    return this._core.jsm.streams.info(`KV_${this._options.bucketName}`);
+  }
+
+  private async _withStreamIdentity<T>(operation: (created: string) => Promise<T>): Promise<T> {
+    const { nats } = this._core;
+    const connection = nats.info;
+    const { created } = await this._streamInfo();
+    // Read the identity again if the transport changed while fetching it.
+    if (nats.info !== connection) {
+      throw NatsError.errorForCode(ErrorCode.Disconnect);
     }
+    return await operation(created);
   }
 
   private async _open(): Promise<KV> {
     const name = this._options.bucketName;
-    if (this._bindOnly) {
-      const { config } = await this._core.jsm.streams.info(`KV_${name}`);
+    if (name !== 'lock' || this._bindOnly) {
+      const { config } = await this._streamInfo();
       return await this._core.js.views.kv(name, { bindOnly: true, allow_direct: config.allow_direct });
     }
 
     return await this._core.js.views.kv(name, {
       replicas: 1,
       ttl: this._options.ttl,
-      storage: StorageType.Memory,
+      storage: StorageType.File,
     });
   }
 
@@ -101,10 +103,11 @@ export class MutexBucket {
     return await retry(async () => {
       if (this._recovery) await this._recovery;
       const kv = this._kv;
-      const epoch = this._connectionEpoch;
-      let revision: number;
       try {
-        revision = await kv.create(key, this._core.encode(undefined));
+        return await this._withStreamIdentity(async created => {
+          const revision = await kv.create(key, this._core.encode(undefined));
+          return () => this._release(kv, key, revision, created);
+        });
       } catch (error) {
         if (isWrongLastSequenceError(error)) {
           throw new MutexLockedError();
@@ -114,25 +117,32 @@ export class MutexBucket {
         }
         throw error;
       }
-
-      return async () => {
-        // A recreated stream can reuse a revision from before the disconnect.
-        if (epoch !== this._connectionEpoch || kv !== this._kv) {
-          return;
-        }
-        try {
-          await kv.delete(key, { previousSeq: revision });
-        } catch (error) {
-          if (!isWrongLastSequenceError(error) && !isMissingBucket(error) && epoch === this._connectionEpoch) {
-            throw error;
-          }
-        }
-      };
     }, {
-      when: isMissingBucket,
+      when: error => isMissingBucket(error) || (error instanceof NatsError && error.code === ErrorCode.Disconnect),
       retries: 2,
       signal: this._recoveryShutdown.signal,
     });
+  }
+
+  private async _release(kv: KV, key: string, revision: number, created: string): Promise<void> {
+    try {
+      await retry(() => this._withStreamIdentity(async current => {
+        // Sequence numbers can be reused when JetStream creates a new stream.
+        if (current === created) {
+          await kv.delete(key, { previousSeq: revision });
+        }
+      }), {
+        when: error => isNoResponders(error) || (error instanceof NatsError && (
+          error.code === ErrorCode.Disconnect || error.code === ErrorCode.Timeout
+        )),
+        retries: 2,
+        signal: this._recoveryShutdown.signal,
+      });
+    } catch (error) {
+      if (!isWrongLastSequenceError(error) && !isMissingStream(error)) {
+        throw error;
+      }
+    }
   }
   
   public mutex(key: string): MutexCell {
@@ -141,8 +151,15 @@ export class MutexBucket {
 }
 
 function isMissingBucket(error: unknown): boolean {
-  return error instanceof NatsError
-    && (error.api_error?.err_code === 10059 || (!error.api_error && error.code === ErrorCode.NoResponders));
+  return isMissingStream(error) || isNoResponders(error);
+}
+
+function isMissingStream(error: unknown): boolean {
+  return error instanceof NatsError && error.api_error?.err_code === 10059;
+}
+
+function isNoResponders(error: unknown): boolean {
+  return error instanceof NatsError && !error.api_error && error.code === ErrorCode.NoResponders;
 }
 
 export type MutexCellParams = {

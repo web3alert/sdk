@@ -102,9 +102,33 @@ function statuses(nc) {
   return received;
 }
 
+async function holdMutex(t, mutex) {
+  let entered, resume;
+  const holding = new Promise(resolve => { entered = resolve; });
+  const blocked = new Promise(resolve => { resume = resolve; });
+  const finished = mutex.lock(async () => {
+    entered();
+    await blocked;
+  });
+  t.after(async () => {
+    resume();
+    await finished.catch(() => {});
+  });
+  await Promise.race([holding, finished.then(() => assert.fail('mutex exited before entering its callback'))]);
+  return async () => {
+    resume();
+    await finished;
+  };
+}
+
+const quickReconnect = { reconnectTimeWait: 50, reconnectJitter: 0 };
+
 test('the same app resumes its service, subscription, durable, registry and mutexes after a 30s outage',
     { timeout: 65_000 }, async t => {
   const f = await fixture(t);
+  const admin = await f.openRaw();
+  // Exercise recovery from a legacy memory bucket provisioned before the SDK connects.
+  await admin.jetstream().views.kv('lock', { storage: 'memory', ttl: 10_000 });
   const { app, client, core } = await f.open();
   const nc = core.nats;
   const events = statuses(nc);
@@ -122,6 +146,7 @@ test('the same app resumes its service, subscription, durable, registry and mute
     async ({ data }) => { delivered.push(data); });
   const info = () => core.jsm.consumers.info(stream.ref.stream, 'durable');
   const before = await info();
+  assert.equal((await core.jsm.streams.info('KV_lock')).config.storage, 'memory');
   const lock = core.mutex('recover');
   const peer = await f.open();
   const peerEvents = statuses(peer.core.nats);
@@ -162,7 +187,7 @@ test('the same app resumes its service, subscription, durable, registry and mute
     await assert.rejects(core.jsm.streams.info('KV_lock'), error => error.api_error?.err_code === 10059);
     await Promise.all([acquire(lock), acquire(core.mutex('recover')), acquire(peerLock)]);
     const recovered = await core.jsm.streams.info('KV_lock');
-    assert.equal(recovered.config.storage, 'memory');
+    assert.equal(recovered.config.storage, 'file');
     assert.equal(recovered.config.max_age, 10_000_000_000);
     await exercise('after');
     await until(async () => (await info()).ack_floor.stream_seq === 2, 'second message was not ACKed');
@@ -177,6 +202,111 @@ test('the same app resumes its service, subscription, durable, registry and mute
     }
   }
   await peer.app.destroy();
+  await app.destroy();
+});
+
+test('a held lock releases after reconnect to the same stream', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const admin = await f.openRaw();
+  const kv = await admin.jetstream().views.kv('lock', { storage: 'file', ttl: 60_000 });
+  const { app, core } = await f.open({ reconnectOptions: quickReconnect });
+  const peer = await f.open();
+  const events = statuses(core.nats);
+  const before = await core.jsm.streams.info('KV_lock');
+  const release = await holdMutex(t, core.mutex('reconnect'));
+  assert.equal((await kv.get('reconnect')).operation, 'PUT');
+
+  await core.nats.reconnect();
+  await until(() => events.some(event => event.type === 'reconnect'), 'lock holder did not reconnect');
+  assert.equal((await core.jsm.streams.info('KV_lock')).created, before.created);
+  await release();
+  assert.equal((await kv.get('reconnect')).operation, 'DEL');
+  await peer.core.mutex('reconnect').lock(async () => {});
+  await peer.app.destroy();
+  await app.destroy();
+});
+
+test('a stale release leaves a recreated stream\'s reused revision untouched', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const { app, core } = await f.open();
+  const admin = await f.openRaw();
+  const provision = () => admin.jetstream().views.kv('lock', { storage: 'file', ttl: 60_000 });
+  const kv = await provision();
+  const before = await core.jsm.streams.info('KV_lock');
+  const release = await holdMutex(t, core.mutex('reused'));
+  const original = await kv.get('reused');
+
+  // Replace the stream while the holder's NATS connection stays up.
+  await kv.destroy();
+  const replacement = await provision();
+  assert.notEqual((await core.jsm.streams.info('KV_lock')).created, before.created);
+  const revision = await replacement.create('reused', codec.encode('new holder'));
+  assert.equal(revision, original.revision, 'the replacement must reuse the old revision');
+  await release();
+  const entry = await replacement.get('reused');
+  assert.equal(entry.operation, 'PUT');
+  assert.equal(entry.revision, revision);
+  assert.equal(codec.decode(entry.value), 'new holder');
+  await app.destroy();
+});
+
+test('a custom lock bucket must be provisioned before connect', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const admin = await f.openRaw();
+  const jsm = await admin.jetstreamManager();
+  const options = { lockBucketName: 'deployment_lock' };
+  await assert.rejects(f.open({ options }), error => error.api_error?.err_code === 10059);
+  await assert.rejects(jsm.streams.info('KV_deployment_lock'), error => error.api_error?.err_code === 10059);
+});
+
+test('recovery of a missing custom lock waits for deployment even with create permission',
+    { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const admin = await f.openRaw();
+  const lockBucketName = 'deployment_lock';
+  const provision = () => admin.jetstream().views.kv(lockBucketName, { storage: 'file', ttl: 60_000 });
+  const kv = await provision();
+  const { telemetry } = createTelemetry({ logLevel: 'error' });
+  let reportRetry;
+  const retrying = new Promise(resolve => { reportRetry = resolve; });
+  telemetry.warn = ({ error }) => reportRetry(error);
+  const { app, core } = await f.open({ options: { lockBucketName }, telemetry });
+  await kv.destroy();
+
+  const acquired = core.mutex('recover-custom').lock(async () => {});
+  const outcome = await Promise.race([retrying, acquired.then(() => assert.fail('SDK recreated a custom lock bucket'))]);
+  assert.equal(outcome.api_error?.err_code, 10059);
+  await assert.rejects(core.jsm.streams.info('KV_deployment_lock'), error => error.api_error?.err_code === 10059);
+  const restored = await provision();
+  await acquired;
+  assert.equal((await restored.get('recover-custom')).operation, 'DEL');
+  const { config } = await core.jsm.streams.info('KV_deployment_lock');
+  assert.equal(config.storage, 'file');
+  assert.equal(config.max_age, 60_000_000_000);
+  await app.destroy();
+});
+
+test('a newly created default lock bucket keeps held keys across a broker restart',
+    { timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const { app, core } = await f.open({ reconnectOptions: quickReconnect });
+  const events = statuses(core.nats);
+  const before = await core.jsm.streams.info('KV_lock');
+  assert.equal(before.config.storage, 'file');
+  assert.equal(before.config.max_age, 10_000_000_000);
+  const kv = await core.js.views.kv('lock', { bindOnly: true, allow_direct: before.config.allow_direct });
+  const release = await holdMutex(t, core.mutex('restart-held'));
+  const held = await kv.get('restart-held');
+
+  await f.stop();
+  await f.start();
+  await until(() => events.some(event => event.type === 'reconnect'), 'file lock holder did not reconnect');
+  assert.equal((await core.jsm.streams.info('KV_lock')).created, before.created);
+  const survived = await kv.get('restart-held');
+  assert.equal(survived.operation, 'PUT');
+  assert.equal(survived.revision, held.revision);
+  await release();
+  assert.equal((await kv.get('restart-held')).operation, 'DEL');
   await app.destroy();
 });
 
@@ -368,11 +498,11 @@ test('custom inbox and a preprovisioned lock work through a narrow broker ACL', 
   let ran = false;
   const acquired = core.mutex(key).lock(async () => { ran = true; });
   void acquired.catch(() => {});
-  await until(() => recoveryWarnings.length === 2, 'restricted client did not retry binding the missing lock bucket');
+  await until(() => recoveryWarnings.length >= 2, 'restricted client did not retry binding the missing lock bucket');
   assert.equal(ran, false);
-  assert.equal(recoveryWarnings[0].error.code, ErrorCode.PermissionsViolation);
+  assert.equal(recoveryWarnings[0].error.api_error?.err_code, 10059);
   assert.equal(recoveryWarnings[1].error.api_error?.err_code, 10059);
-  assert.equal(events.filter(event => event.permissionContext?.subject === `$JS.API.STREAM.CREATE.KV_${lockBucketName}`).length, 1);
+  assert.deepEqual(events.filter(event => event.type === 'error'), []);
   const restored = await provision();
   await acquired;
   assert.equal(ran, true);

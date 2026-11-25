@@ -236,21 +236,23 @@ flow control. The SDK logs each rejection and increments
 
 Set `options: { lockBucketName: 'marketplace_sandbox_lock' }` to put that
 app's mutexes in a separate KV bucket. The default is `lock`. Apps that
-coordinate via a shared mutex must use the same bucket. Provision the
-restricted client's custom bucket before startup, with file storage on the
-persistent JetStream volume, one replica and a TTL matching
-`options.lockTimeout` (10 seconds by default).
+coordinate via a shared mutex must use the same bucket. Provision custom
+buckets before startup, with file storage on the persistent JetStream volume,
+one replica and a TTL matching `options.lockTimeout` (10 seconds by default).
 Enable direct reads on the bucket for the ACL shown below. The existing
 `registry` KV bucket must also be present. Opening these preprovisioned
 buckets checks stream metadata and leaves their settings as provisioned.
-The default `lock` bucket uses memory storage. On the first use of a missing
-bucket, a client with stream-create permissions can recreate it. A restricted
-client logs the failure and retries binding with backoff until the deploy job
-restores the bucket.
+The SDK creates a missing default `lock` bucket with file storage and preserves
+the storage settings of an existing bucket. During recovery it creates only the
+default bucket. For a missing custom bucket, the client logs the failure and
+retries binding with backoff until the deploy job restores it. Mutex operations
+read the stream creation timestamp so a held lock can release after reconnect
+and a stale release can detect a replacement stream.
 
 | Operation | Publish subjects for the example configuration |
 | --- | --- |
 | `connect()` | `$JS.API.INFO`, `$JS.API.STREAM.INFO.KV_marketplace_sandbox_lock`, `$JS.API.STREAM.INFO.KV_registry` |
+| Check the lock's stream when acquiring and releasing a mutex | `$JS.API.STREAM.INFO.KV_marketplace_sandbox_lock` |
 | Acquire and release a mutex | `$KV.marketplace_sandbox_lock.<key>` |
 | Read after a mutex sequence conflict, including reacquisition after release | `$JS.API.DIRECT.GET.KV_marketplace_sandbox_lock.$KV.marketplace_sandbox_lock.<key>` |
 
@@ -631,8 +633,9 @@ retain messages after the last durable consumer has actually been removed.
 
 Run `npm test` for unit/type checks and `npm run test:transport` with a native
 `nats-server` on PATH for isolated JetStream restart, reconnect, pending/backlog,
-unsubscribe and repeated teardown checks. The latter creates and removes only
-its own temporary server/data directory; it does not use Docker.
+unsubscribe and repeated teardown checks. Transport test files run serially to
+keep the short lease-renewal deadlines isolated from the other broker tests.
+Each fixture creates and removes its own temporary server/data directory.
 
 ### Actions
 
