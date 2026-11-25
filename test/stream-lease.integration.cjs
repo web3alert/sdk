@@ -56,7 +56,8 @@ test('suspend keeps leases while draining accepted work, then leaves no renewal 
     assert.equal(closed,false);assert.equal((await f.info()).num_ack_pending,1);
     assert.ok(f.sub._pendingLeaseTimer);
     release();await closing;
-    assert.equal((await f.info()).num_ack_pending,0);assert.equal(f.sub._pendingLeaseTimer,undefined);
+    await until(async()=>!(await f.info()).num_ack_pending,'final ACK reached the broker');
+    assert.equal(f.sub._pendingLeaseTimer,undefined);
   }finally{release();await f.close();}
 });
 

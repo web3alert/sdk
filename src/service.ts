@@ -51,7 +51,7 @@ export class Service extends Autodestructible {
       } catch (err) {
         message.respond({ error: serializeError(err) });
       }
-    }, { queue: subject });
+    }, { queue: subject, requestHandler: true });
     
     this.use(subscription);
   }

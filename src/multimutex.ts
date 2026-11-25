@@ -28,7 +28,7 @@ export class MutexBucket {
     
     this._core = core;
     this._options = defaults(options, {
-      bucketName: 'lock',
+      bucketName: this._core.options.lockBucketName ?? 'lock',
       ttl: this._core.options.lockTimeout,
     });
   }

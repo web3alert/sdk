@@ -3,10 +3,15 @@ import { type Subscription as NatsSubscription, Msg as NatsMsg } from 'nats';
 import { Web3alertError } from './errors';
 import { type Listener } from './listener';
 import { type Core } from './core';
+import { isInboxSubject } from './inbox';
+import { type Counter, type Metrics } from './types';
+
+const rejectedReplies = new WeakMap<Metrics, Counter>();
 
 export type SubscriptionBackendOptions = {
   queue?: string | undefined;
   concurrency?: number;
+  requestHandler?: boolean;
 };
 
 export type SubscriptionMessageRespondCallback = (data?: unknown) => void;
@@ -61,11 +66,21 @@ export class Subscription<T> {
 
   private async _handleMessage(message: NatsMsg): Promise<void> {
     try {
+      const replyAllowed = Boolean(message.reply && isInboxSubject(message.reply));
+      if (this._options?.requestHandler && message.reply && !replyAllowed) {
+        this._rejectReply(message.subject);
+        return;
+      }
+
       await this._callback({
         subject: message.subject,
         data: this._core.decode(message.data) as T,
         respond: data => {
-          message.respond(this._core.encode(data));
+          if (replyAllowed) {
+            message.respond(this._core.encode(data));
+          } else if (message.reply) {
+            this._rejectReply(message.subject);
+          }
         },
       });
     } catch (err) {
@@ -76,6 +91,20 @@ export class Subscription<T> {
         },
       });
     }
+  }
+
+  private _rejectReply(subject: string): void {
+    const telemetry = this._core.telemetry;
+    let counter = rejectedReplies.get(telemetry.metrics);
+    if (!counter) {
+      counter = telemetry.counter({
+        name: 'nats_invalid_reply_subject_total',
+        help: 'NATS requests and responses dropped because the reply subject was outside an inbox',
+      });
+      rejectedReplies.set(telemetry.metrics, counter);
+    }
+    counter.inc();
+    telemetry.warn({ subject }, 'dropped invalid NATS reply subject');
   }
   
   public async init(): Promise<void> {

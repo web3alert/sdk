@@ -97,6 +97,50 @@ const app = await connect({
 });
 ```
 
+Established connections reconnect indefinitely by default. Retries use a
+2-second wait with up to 1 second of random jitter for both plaintext and TLS.
+Use `reconnectOptions` to override nats.js settings such as
+`maxReconnectAttempts`, `reconnectTimeWait`, `reconnectJitter`,
+`reconnectJitterTLS`, `reconnectDelayHandler` or `reconnect`.
+The initial connection and SDK initialization still reject on failure.
+
+If an established connection closes unexpectedly, the SDK logs the error and
+exits the process with status 1. Set `onConnectionLost(error)` to own that
+shutdown in your application. It runs once on terminal closure and may return
+a promise. A callback that throws or rejects falls back to the default exit.
+`app.destroy()` and explicit NATS close or drain are graceful shutdown paths.
+
+For a restricted NATS user, set `inboxPrefix: '_INBOX_sandbox'` and allow
+subscription to `_INBOX_sandbox.>`. The prefix must be `_INBOX` (the default)
+or `_INBOX_<name>`, with letters, digits, underscores or hyphens in the name.
+The SDK and nats.js use it for request replies and JetStream delivery inboxes.
+SDK service and function handlers drop requests with other reply subjects.
+The SDK logs each rejection and increments `nats_invalid_reply_subject_total`.
+
+Set `options: { lockBucketName: 'marketplace_sandbox_lock' }` to put that
+app's mutexes in a separate KV bucket. The default is `lock`. Apps that
+coordinate via a shared mutex must use the same bucket. Provision the
+custom bucket before starting a restricted client, with memory storage,
+one replica and a TTL matching `options.lockTimeout` (10 seconds by default).
+Enable direct reads on the bucket for the ACL shown below. The existing
+`registry` KV bucket must also be present. Opening these preprovisioned
+buckets checks stream metadata and leaves their settings as provisioned.
+
+| Operation | Publish subjects for the example configuration |
+| --- | --- |
+| `connect()` | `$JS.API.INFO`, `$JS.API.STREAM.INFO.KV_marketplace_sandbox_lock`, `$JS.API.STREAM.INFO.KV_registry` |
+| Acquire and release a mutex | `$KV.marketplace_sandbox_lock.<key>` |
+| Read after a mutex sequence conflict, including reacquisition after release | `$JS.API.DIRECT.GET.KV_marketplace_sandbox_lock.$KV.marketplace_sandbox_lock.<key>` |
+
+The key is the NATS KV key passed to the mutex, including any application
+namespace.
+The client receives all these replies via `_INBOX_sandbox.>`. With direct
+reads disabled, the mutex read uses
+`$JS.API.STREAM.MSG.GET.KV_marketplace_sandbox_lock` instead. An ordinary
+read from the direct-enabled registry uses
+`$JS.API.DIRECT.GET.KV_registry.$KV.registry.<key>`; application service
+requests and other bucket operations need their own permissions.
+
 ### Client
 
 Clients provide namespaced access to SDK features within a specific project:

@@ -69,6 +69,7 @@ export class Fun<P, R> {
     }, {
       queue: subject,
       concurrency: this._options.concurrency,
+      requestHandler: true,
     });
   }
   

@@ -53,6 +53,7 @@ import {
 export type GlobalOptions = {
   heartbeatInterval: number;
   lockTimeout: number;
+  lockBucketName?: string;
   streamDefaults?: Partial<StreamOptions>;
 };
 
@@ -79,6 +80,7 @@ export class Core {
   public uncaughtException: ErrorCallback;
   public multimutex!: MutexBucket;
   public registry!: Bucket<unknown>;
+  private _isShuttingDown = false;
   
   public stream: StreamFactory;
   public sliceSpawner: SliceSpawnerFactory;
@@ -151,11 +153,31 @@ export class Core {
     this.registry = await this.bucket('registry');
   }
   
+  public get isShuttingDown(): boolean {
+    return this._isShuttingDown;
+  }
+
+  public beginShutdown(): void {
+    if (!this.nats.isClosed()) {
+      this._isShuttingDown = true;
+    }
+  }
+
   public async destroy(): Promise<void> {
+    this.beginShutdown();
     this.autoabortable.abort();
-    await this.registry.destroy();
-    await this.nats.drain();
-    this.telemetry.destroy();
+    try {
+      await this.registry.destroy();
+      if (!this.nats.isClosed() && !this.nats.isDraining()) {
+        await this.nats.drain();
+      }
+    } finally {
+      try {
+        await this.nats.close();
+      } finally {
+        this.telemetry.destroy();
+      }
+    }
   }
   
   public encode(data: unknown): Uint8Array {

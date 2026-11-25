@@ -41,9 +41,9 @@ async function fixture() {
   try { await until(() => { if (spawnError) throw spawnError; return logs; }, value => value.includes('Server is ready'), 'NATS startup'); }
   catch (error) { await close(); throw error; }
   const errors = [];
-  const open = async () => connect({ servers: `nats://127.0.0.1:${port}`, workspaceName: 'test', appName: 'retention',
+  const open = async (connectionOptions = {}) => connect({ servers: `nats://127.0.0.1:${port}`, workspaceName: 'test', appName: 'retention',
     telemetry: createTelemetry({ logLevel: 'error', logFormat: 'json' }).telemetry,
-    options: { heartbeatInterval: 1000 }, uncaughtException: error => { errors.push(error); } });
+    options: { heartbeatInterval: 1000 }, uncaughtException: error => { errors.push(error); }, ...connectionOptions });
   return { open, close, errors };
 }
 
@@ -118,7 +118,9 @@ test('expired heartbeat retains source tasks while their durable consumer surviv
 test('durable pending and backlog survive whole-client restart; actual unsubscribe removes them', { timeout: 60000 }, async () => {
   const f = await fixture(); let app, publisher, consumer;
   try {
-    app = await f.open(); publisher = await app.client('source', {}, { detach: true });
+    // Reconnect before the parked message comes due, then suspend the reader.
+    app = await f.open({ reconnectOptions: { reconnectTimeWait: 50, reconnectJitter: 0 } });
+    publisher = await app.client('source', {}, { detach: true });
     const triggerArgs = { name: 'events', tester: async input => input,
       runner: async ({ params, publish }) => async input => publish({ input, wallet: params.wallet }) };
     let trigger = await publisher.trigger(triggerArgs);
@@ -131,6 +133,9 @@ test('durable pending and backlog survive whole-client restart; actual unsubscri
       callback: async () => { attempts++; throw Object.assign(Error('intentional pending delivery'), { redeliveryDelayMs: 2000 }); } });
     await trigger.executeForParams(1, [params]);
     await until(() => attempts, count => count > 0, 'first attempt');
+    // Finish sending the delayed NAK before the forced disconnect.
+    await subscription._subscription._queue.drained();
+    await publisher.core.nats.flush();
     const original = await info();
     const statuses = publisher.core.nats.status();
     const reconnected = (async () => {
