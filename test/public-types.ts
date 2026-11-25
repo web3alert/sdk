@@ -2,6 +2,18 @@ import {
   HttpAgent,
   HttpAgentClientError,
   HttpAgentError,
+  OutboundRequestError,
+  createOutboundLookup,
+  guardedRequest,
+  isOutboundAddressAllowed,
+  type OutboundAddress,
+  type OutboundErrorCode,
+  type OutboundLookupOptions,
+  type OutboundPolicy,
+  type OutboundProtocol,
+  type OutboundRequestOptions,
+  type OutboundResolver,
+  type OutboundResponse,
   type Event,
   type ClientLocal,
   type HttpAgentClientErrorOptions,
@@ -16,6 +28,38 @@ import {
   type ActionEvent,
   type ActionInput,
 } from '../dist';
+import type { SocketConnectOpts } from 'node:net';
+
+const outboundAddress: OutboundAddress = { address: '8.8.8.8', family: 4 };
+const resolveOutbound: OutboundResolver = async (_hostname: string) => [outboundAddress];
+const wss: OutboundProtocol = 'wss:';
+const outboundPolicy: OutboundPolicy = {
+  allowedProtocols: [wss],
+  allowedPorts: { 'wss:': [443, 8443] },
+  allowedOrigins: ['wss://rpc.example.test:8443'],
+  allowedPrivateCidrs: ['127.0.0.1/32'],
+  resolve: resolveOutbound,
+};
+const outboundLookupOptions: OutboundLookupOptions = { policy: outboundPolicy };
+const wsLookup = createOutboundLookup(new URL('wss://rpc.example.test:8443'), outboundLookupOptions);
+const socketOptions: SocketConnectOpts = { host: 'rpc.example.test', port: 8443, lookup: wsLookup };
+const outboundOptions: OutboundRequestOptions = {
+  method: 'POST',
+  body: Buffer.from('{}'),
+  headers: { 'content-type': 'application/json' },
+  timeoutMs: 2000,
+  maxResponseBytes: 4096,
+  maxRedirects: 1,
+  secretHeaders: ['x-auth-token'],
+  proxy: 'http://squid:8080',
+};
+const outboundResult: Promise<OutboundResponse> = guardedRequest('https://example.test', outboundOptions);
+const outboundBody: Promise<Buffer> = outboundResult.then(response => response.body);
+const outboundAllowed: boolean = isOutboundAddressAllowed('::1', ['::1/128']);
+const outboundCode: OutboundErrorCode = new OutboundRequestError('HTTP_STATUS', 429).code;
+void [socketOptions, outboundBody, outboundAllowed, outboundCode];
+// @ts-expect-error Node's HTTP client options cannot override the pinned connection
+void guardedRequest('https://example.test', { lookup: wsLookup });
 
 declare const client: Client;
 void client.action('send').params<{ url: string }>().callback(async (input, delivery: ActionDeliveryContext) => {
