@@ -5,6 +5,7 @@ A comprehensive TypeScript SDK for building distributed microservices and event-
 ## Table of Contents
 
 - [Installation](#installation)
+- [Outbound request policy](#outbound-request-policy)
 - [Version 4](#version-4)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
@@ -26,6 +27,100 @@ A comprehensive TypeScript SDK for building distributed microservices and event-
 ```bash
 npm install @web3alert/sdk
 ```
+
+## Outbound request policy
+
+Use `guardedRequest(url, options)` for HTTP or HTTPS destinations supplied by
+users. The default policy permits ports 80 for HTTP and 443 for HTTPS and
+blocks private and special-use addresses. `allowedPorts` replaces the default
+for each configured protocol. Use exact `allowedOrigins` for destinations
+owned by a known integration, and reserve `allowedPrivateCidrs` and custom
+`resolve` for trusted service configuration. The [range table](src/outbound-address.ts)
+lists the blocked networks and the ranges eligible for private CIDR exceptions.
+`isOutboundAddressAllowed(ip, allowedPrivateCidrs?)` checks a standard IP literal
+without performing network I/O.
+
+**API request**
+
+```typescript
+import { guardedRequest } from '@web3alert/sdk';
+
+const { body } = await guardedRequest(providerUrl, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(payload),
+  timeoutMs: 3_000,
+  maxResponseBytes: 256 * 1024,
+});
+const data = JSON.parse(body.toString('utf8'));
+```
+
+**Devourer provider through Squid**
+
+```typescript
+const { status, headers, body } = await guardedRequest(providerUrl, {
+  proxy: 'http://squid:8080', // Trusted service configuration
+  timeoutMs: providerTimeoutMs,
+  maxResponseBytes: providerResponseLimit,
+});
+```
+
+The SDK checks all target addresses, dials the first checked address, and uses
+the URL hostname for HTTP Host, TLS SNI, and certificate verification. With a
+proxy configured, both HTTP and HTTPS use CONNECT to the checked numeric IP and
+port. The proxy is trusted to honor that authority. The SDK selects the proxy
+from the explicit option and fails closed if the tunnel is refused. To support
+proxied HTTP on port 80, Squid's CONNECT ACL must permit port 80 for the
+appropriate clients. A configuration that allows CONNECT only on 443 supports
+only port 443 through this path.
+
+**RPC WebSocket using a client with a Node lookup option**
+
+```typescript
+import { createOutboundLookup } from '@web3alert/sdk';
+import WebSocket from 'ws';
+
+function connectRpc(endpoint: string) {
+  const url = new URL(endpoint);
+  const lookup = createOutboundLookup(url, {
+    policy: { allowedProtocols: ['ws:', 'wss:'] },
+    timeoutMs: 3_000,
+  });
+  return new WebSocket(url, { lookup, followRedirects: false, handshakeTimeout: 5_000 });
+}
+```
+
+Bind the hook to the same final URL that the client dials and apply it on every
+reconnect. It checks literal addresses when created because Node skips DNS for
+literals. For hostnames it resolves and checks both families on every connection,
+including when the client asks for a single family. Use it for direct connections
+with client redirects disabled. The hook governs DNS, so the client still owns
+the handshake and message limits.
+
+**Strict-origin delivery**
+
+```typescript
+await guardedRequest(slackHookUrl, {
+  proxy: 'http://squid:8080',
+  policy: { allowedProtocols: ['https:'], allowedOrigins: ['https://hooks.slack.com'] },
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(message),
+});
+```
+
+The default deadline is 10 seconds from DNS through the last response byte,
+including redirects. The default response limit is 1 MiB, checked while reading.
+Success returns the status, headers, and a bounded `Buffer`. The client asks
+for identity encoding and returns the bytes as received after HTTP framing.
+Non-2xx statuses become `OutboundRequestError` with a fixed message, code and
+numeric status. Errors omit upstream text, headers, bodies and native causes.
+
+Set `maxRedirects` to opt in. Each hop is checked again, and origin changes drop
+`Authorization`, `Cookie`, and names in `secretHeaders`. The SDK always drops
+`Proxy-Authorization` and supplies the routing and framing headers. Redirects
+that preserve the method can replay the body at the next URL, so enable redirects
+for requests whose bodies can be forwarded.
 
 ## Version 4
 

@@ -19,6 +19,7 @@ export * from './async-map';
 export * from './compare';
 export * from './monitor';
 export * from './http-agent';
+export * from './outbound-request';
 export * from './launch';
 export * from './web-server';
 export * from './mutex';
