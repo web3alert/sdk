@@ -3,7 +3,7 @@ import { type Subscription as NatsSubscription, Msg as NatsMsg } from 'nats';
 import { Web3alertError } from './errors';
 import { type Listener } from './listener';
 import { type Core } from './core';
-import { isInboxSubject } from './inbox';
+import { isReplySubject } from './inbox';
 import { type Counter, type Metrics } from './types';
 
 const rejectedReplies = new WeakMap<Metrics, Counter>();
@@ -66,7 +66,7 @@ export class Subscription<T> {
 
   private async _handleMessage(message: NatsMsg): Promise<void> {
     try {
-      const replyAllowed = Boolean(message.reply && isInboxSubject(message.reply));
+      const replyAllowed = Boolean(message.reply && isReplySubject(message.reply));
       if (this._options?.requestHandler && message.reply && !replyAllowed) {
         this._rejectReply(message.subject);
         return;
@@ -99,7 +99,7 @@ export class Subscription<T> {
     if (!counter) {
       counter = telemetry.counter({
         name: 'nats_invalid_reply_subject_total',
-        help: 'NATS requests and responses dropped because the reply subject was outside an inbox',
+        help: 'NATS requests and responses dropped because the reply subject was outside an inbox or service mapping',
       });
       rejectedReplies.set(telemetry.metrics, counter);
     }

@@ -72,10 +72,7 @@ export async function connect(params: ConnectParams): Promise<App> {
     core.beginShutdown();
     return close();
   };
-  nats.drain = () => {
-    core.beginShutdown();
-    return drain();
-  };
+  nats.drain = () => core.trackDrain(drain);
 
   let app: App;
   try {

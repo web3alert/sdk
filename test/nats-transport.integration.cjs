@@ -102,7 +102,7 @@ function statuses(nc) {
   return received;
 }
 
-test('the same app resumes its service, subscription, durable and registry after a 30s outage',
+test('the same app resumes its service, subscription, durable, registry and mutexes after a 30s outage',
     { timeout: 65_000 }, async t => {
   const f = await fixture(t);
   const { app, client, core } = await f.open();
@@ -122,6 +122,16 @@ test('the same app resumes its service, subscription, durable and registry after
     async ({ data }) => { delivered.push(data); });
   const info = () => core.jsm.consumers.info(stream.ref.stream, 'durable');
   const before = await info();
+  const lock = core.mutex('recover');
+  const peer = await f.open();
+  const peerEvents = statuses(peer.core.nats);
+  const peerLock = peer.core.mutex('recover');
+  let active = 0;
+  const acquire = mutex => mutex.lock(async () => {
+    assert.equal(++active, 1, 'recovered locks must still provide mutual exclusion');
+    await sleep(20);
+    active--;
+  });
 
   async function exercise(value) {
     assert.equal(await core.call('app.test.app.echo.echo', value), value);
@@ -135,6 +145,7 @@ test('the same app resumes its service, subscription, durable and registry after
   }
 
   try {
+    await acquire(lock);
     await exercise('before');
     await until(async () => (await info()).ack_floor.stream_seq === 1, 'first message was not ACKed');
 
@@ -147,6 +158,12 @@ test('the same app resumes its service, subscription, durable and registry after
     await until(() => events.some(event => event.type === 'reconnect'), 'reconnect not reported');
 
     assert.equal(await core.registry.get('reconnect'), 'before');
+    await until(() => peerEvents.some(event => event.type === 'reconnect'), 'peer reconnect not reported');
+    await assert.rejects(core.jsm.streams.info('KV_lock'), error => error.api_error?.err_code === 10059);
+    await Promise.all([acquire(lock), acquire(core.mutex('recover')), acquire(peerLock)]);
+    const recovered = await core.jsm.streams.info('KV_lock');
+    assert.equal(recovered.config.storage, 'memory');
+    assert.equal(recovered.config.max_age, 10_000_000_000);
     await exercise('after');
     await until(async () => (await info()).ack_floor.stream_seq === 2, 'second message was not ACKed');
     assert.equal((await info()).created, before.created);
@@ -159,6 +176,7 @@ test('the same app resumes its service, subscription, durable and registry after
       await subscription.destroy();
     }
   }
+  await peer.app.destroy();
   await app.destroy();
 });
 
@@ -178,6 +196,49 @@ test('app destroy, explicit close and explicit drain are graceful', { timeout: 1
   }
 });
 
+test('app destroy waits for the in-flight connection drain', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const { app, core } = await f.open();
+  const nc = core.nats;
+  let unblock;
+  const blocked = new Promise(resolve => { unblock = resolve; });
+  const flush = nc.protocol.flush.bind(nc.protocol);
+  t.mock.method(nc.protocol, 'flush', async (...args) => {
+    await blocked;
+    return flush(...args);
+  });
+
+  const drain = nc.drain();
+  const shutdown = app.destroy();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(nc.isDraining(), true);
+    assert.equal(nc.isClosed(), false);
+  } finally {
+    unblock();
+    await Promise.all([drain, shutdown]);
+  }
+  assert.equal(nc.isClosed(), true);
+  assert.deepEqual(f.lost, []);
+});
+
+test('app destroy closes the connection when the drain stalls', { timeout: 10_000 }, async t => {
+  const f = await fixture(t);
+  const { app, core } = await f.open();
+  let unblock;
+  const blocked = new Promise((_, reject) => { unblock = reject; });
+  t.mock.method(core.nats.protocol, 'flush', () => blocked);
+  const drain = core.nats.drain();
+  try {
+    await app.destroy();
+    assert.equal(core.nats.isClosed(), true);
+    assert.deepEqual(f.lost, []);
+  } finally {
+    unblock(new Error('fixture cleanup'));
+    await drain;
+  }
+});
+
 test('an unexpected errorless close invokes the hook once', { timeout: 10_000 }, async t => {
   const f = await fixture(t);
   const { core } = await f.open({ reconnectOptions: { reconnect: false } });
@@ -189,7 +250,7 @@ test('an unexpected errorless close invokes the hook once', { timeout: 10_000 },
   assert.deepEqual(events.map(event => event.type), ['disconnect']);
 });
 
-test('exhausted attempts exit the process nonzero even with active timers', { timeout: 10_000 }, async t => {
+test('exhausted attempts exit the process nonzero even with active timers', async t => {
   const f = await fixture(t);
   const child = spawn(process.execPath, ['-e', `
     const { connect, createTelemetry } = require(process.argv[1]);
@@ -200,6 +261,9 @@ test('exhausted attempts exit the process nonzero even with active timers', { ti
     }).then(() => {
       setInterval(() => {}, 1000);
       process.send('ready');
+    }, error => {
+      console.error(error);
+      process.exit(1);
     });
   `, sdkPath, f.servers], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   let stderr = '';
@@ -209,12 +273,21 @@ test('exhausted attempts exit the process nonzero even with active timers', { ti
     child.kill('SIGKILL');
     await exited;
   });
-  const ready = await Promise.race([once(child, 'message'), exited]);
+  // A cold Node worker can spend seconds loading the SDK under the full suite.
+  // Give setup its own deadline and start timing reconnect exhaustion at readiness.
+  const ready = await Promise.race([
+    once(child, 'message', { signal: AbortSignal.timeout(30_000) }).catch(error => {
+      throw new Error('SDK worker did not report ready', { cause: error });
+    }),
+    exited,
+  ]);
   assert.equal(ready[0], 'ready', stderr);
-  await f.stop();
-  assert.deepEqual(await exited, [1, null], stderr);
-  assert.match(stderr, /NATS connection lost/);
-  assert.match(stderr, /CONNECTION_REFUSED/);
+  await t.test('the ready worker exits after the broker stops', { timeout: 10_000 }, async () => {
+    await f.stop();
+    assert.deepEqual(await exited, [1, null], stderr);
+    assert.match(stderr, /NATS connection lost/);
+    assert.match(stderr, /CONNECTION_REFUSED/);
+  });
 });
 
 test('authorization errors on reconnect become terminal, while initial auth rejects connect',
@@ -263,7 +336,8 @@ test('custom inbox and a preprovisioned lock work through a narrow broker ACL', 
   const f = await fixture(t, restrictedConfig);
   const admin = await f.open({ username: 'admin', password: 'fixture' });
   const lockBucketName = 'marketplace_sandbox_lock';
-  const lock = await admin.core.js.views.kv(lockBucketName, { storage: 'memory', ttl: 10_000, replicas: 1 });
+  const provision = () => admin.core.js.views.kv(lockBucketName, { storage: 'file', ttl: 10_000, replicas: 1 });
+  const lock = await provision();
   await admin.core.registry.put('sample', 'stored value');
   const service = await admin.client.container.use(() => admin.core.service('app.test.app.echo'));
   await service.method('echo', async ({ req, res }) => { res.data = req.data; });
@@ -271,7 +345,10 @@ test('custom inbox and a preprovisioned lock work through a narrow broker ACL', 
   const restricted = { username: 'sandbox', password: 'fixture', options: { lockBucketName } };
   await assert.rejects(f.open(restricted), { code: ErrorCode.PermissionsViolation });
 
-  const { app, client, core } = await f.open({ ...restricted, inboxPrefix: '_INBOX_sandbox' });
+  const { telemetry } = createTelemetry({ logLevel: 'error' });
+  const recoveryWarnings = [];
+  telemetry.warn = details => recoveryWarnings.push(details);
+  const { app, core } = await f.open({ ...restricted, inboxPrefix: '_INBOX_sandbox', telemetry });
   const events = statuses(core.nats);
   assert.equal(await core.call('app.test.app.echo.echo', 'hello'), 'hello');
   assert.equal(await core.registry.get('sample'), 'stored value');
@@ -287,6 +364,19 @@ test('custom inbox and a preprovisioned lock work through a narrow broker ACL', 
   }
   await core.nats.flush();
   assert.deepEqual(events.filter(event => event.type === 'error'), []);
+  await admin.core.jsm.streams.delete(`KV_${lockBucketName}`);
+  let ran = false;
+  const acquired = core.mutex(key).lock(async () => { ran = true; });
+  void acquired.catch(() => {});
+  await until(() => recoveryWarnings.length === 2, 'restricted client did not retry binding the missing lock bucket');
+  assert.equal(ran, false);
+  assert.equal(recoveryWarnings[0].error.code, ErrorCode.PermissionsViolation);
+  assert.equal(recoveryWarnings[1].error.api_error?.err_code, 10059);
+  assert.equal(events.filter(event => event.permissionContext?.subject === `$JS.API.STREAM.CREATE.KV_${lockBucketName}`).length, 1);
+  const restored = await provision();
+  await acquired;
+  assert.equal(ran, true);
+  assert.equal((await restored.get(key)).operation, 'DEL');
   assert.deepEqual(f.lost, []);
   await app.destroy();
   await admin.app.destroy();
@@ -343,5 +433,52 @@ test('service and function guard replies while accepting both inbox forms', { ti
   }
   assert.deepEqual(calls, ['default', 'custom', 'default', 'custom']);
   await subscription.destroy();
+  await app.destroy();
+});
+
+test('SDK service answers a real NATS account service import', { timeout: 10_000 }, async t => {
+  const f = await fixture(t, `
+system_account: SYS
+accounts {
+  SYS {}
+  SOURCE {
+    jetstream: enabled
+    users: [{ user: "source", password: "fixture" }]
+    exports: [
+      { service: "test.echo" },
+      { service: "test.tracked", latency: { sampling: 100, subject: "test.latency" } }
+    ]
+  }
+  IMPORTER {
+    users: [{ user: "importer", password: "fixture" }]
+    imports: [
+      { service: { account: SOURCE, subject: "test.echo" }, to: "test.import" },
+      { service: { account: SOURCE, subject: "test.tracked" }, to: "test.import_tracked" }
+    ]
+  }
+}
+`);
+  const { app, client, core } = await f.open({ username: 'source', password: 'fixture' });
+  const service = await client.container.use(() => core.service('test'));
+  const imported = await f.openRaw({ user: 'importer', pass: 'fixture' });
+  const exporter = await f.openRaw({ user: 'source', pass: 'fixture' });
+  for (const [method, importedSubject, pattern] of [
+    ['echo', 'test.import', /^_R_\.[A-Za-z0-9]{6}\.[A-Za-z0-9]{6}$/],
+    ['tracked', 'test.import_tracked', /^_R_\.[A-Za-z0-9]{6}\.[A-Za-z0-9]{6}\.[A-Za-z0-9]{8}\.T$/],
+  ]) {
+    await service.method(method, async ({ req, res }) => { res.data = req.data; });
+    const observer = exporter.subscribe(`test.${method}`, { max: 1 });
+    const observation = (async () => {
+      for await (const msg of observer) return msg.reply;
+    })();
+    await Promise.all([core.nats.flush(), exporter.flush()]);
+
+    const [reply, result] = await Promise.all([
+      observation,
+      imported.request(importedSubject, codec.encode('"mapped reply"'), { timeout: 1500 }),
+    ]);
+    assert.match(reply, pattern);
+    assert.deepEqual(JSON.parse(codec.decode(result.data)), { result: 'mapped reply' });
+  }
   await app.destroy();
 });

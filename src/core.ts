@@ -13,6 +13,7 @@ import {
   DeliverPolicy,
   StringCodec,
 } from 'nats';
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
   type Telemetry,
   type Callback,
@@ -81,6 +82,7 @@ export class Core {
   public multimutex!: MutexBucket;
   public registry!: Bucket<unknown>;
   private _isShuttingDown = false;
+  private _drain?: Promise<void>;
   
   public stream: StreamFactory;
   public sliceSpawner: SliceSpawnerFactory;
@@ -161,6 +163,28 @@ export class Core {
     if (!this.nats.isClosed()) {
       this._isShuttingDown = true;
     }
+    void this.multimutex?.destroy();
+  }
+
+  public trackDrain(drain: () => Promise<void>): Promise<void> {
+    this.beginShutdown();
+    const pending = drain();
+    if (!this.nats.isClosed()) {
+      this._drain ??= pending;
+    }
+    return pending;
+  }
+
+  private async _waitForDrain(): Promise<void> {
+    const pending = this._drain ?? (this.nats.isClosed() ? undefined : this.nats.drain());
+    if (!pending) return;
+
+    const timeout = new AbortController();
+    try {
+      await Promise.race([pending, sleep(5_000, undefined, { signal: timeout.signal })]);
+    } finally {
+      timeout.abort();
+    }
   }
 
   public async destroy(): Promise<void> {
@@ -168,14 +192,15 @@ export class Core {
     this.autoabortable.abort();
     try {
       await this.registry.destroy();
-      if (!this.nats.isClosed() && !this.nats.isDraining()) {
-        await this.nats.drain();
-      }
     } finally {
       try {
-        await this.nats.close();
+        await this._waitForDrain();
       } finally {
-        this.telemetry.destroy();
+        try {
+          await this.nats.close();
+        } finally {
+          this.telemetry.destroy();
+        }
       }
     }
   }

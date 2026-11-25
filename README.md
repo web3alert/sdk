@@ -86,7 +86,7 @@ function connectRpc(endpoint: string) {
     policy: { allowedProtocols: ['ws:', 'wss:'] },
     timeoutMs: 3_000,
   });
-  return new WebSocket(url, { lookup, followRedirects: false, handshakeTimeout: 5_000 });
+  return new WebSocket(url, { lookup, agent: false, followRedirects: false, handshakeTimeout: 5_000 });
 }
 ```
 
@@ -94,8 +94,10 @@ Bind the hook to the same final URL that the client dials and apply it on every
 reconnect. It checks literal addresses when created because Node skips DNS for
 literals. For hostnames it resolves and checks both families on every connection,
 including when the client asks for a single family. Use it for direct connections
-with client redirects disabled. The hook governs DNS, so the client still owns
-the handshake and message limits.
+with client redirects disabled. Start every handshake and reconnect on a fresh
+socket. With `ws`, pass `agent: false` as above. A shared keep-alive agent can
+reuse a pooled socket and bypass the lookup. The client owns the handshake and
+message limits.
 
 **Strict-origin delivery**
 
@@ -115,12 +117,24 @@ Success returns the status, headers, and a bounded `Buffer`. The client asks
 for identity encoding and returns the bytes as received after HTTP framing.
 Non-2xx statuses become `OutboundRequestError` with a fixed message, code and
 numeric status. Errors omit upstream text, headers, bodies and native causes.
+The default target resolver queries A and AAAA in parallel using c-ares, with a
+two-second query timeout and one try per nameserver. Each lookup has its own
+resolver and is cancelled on deadline or abort. The resolver uses the configured
+nameservers, including Docker's embedded DNS. It checks every address before
+selecting one and orders IPv4 before IPv6.
+
+Literal IPs bypass DNS. The default resolver maps `localhost` to both loopback
+addresses, which still require explicit CIDR allowances. For target names
+defined only in `/etc/hosts`, supply a trusted `policy.resolve` that returns
+all IPv4 and IPv6 answers. A custom resolver manages its own cancellation and
+concurrency.
 
 Set `maxRedirects` to opt in. Each hop is checked again, and origin changes drop
 `Authorization`, `Cookie`, and names in `secretHeaders`. The SDK always drops
-`Proxy-Authorization` and supplies the routing and framing headers. Redirects
-that preserve the method can replay the body at the next URL, so enable redirects
-for requests whose bodies can be forwarded.
+`Proxy-Authorization` and supplies the routing and framing headers. A cross-origin
+redirect that would resend a body fails with `REDIRECT_BODY_DENIED`. Set
+`allowCrossOriginBodyRedirects: true` only when the destination can receive the
+body. Same-origin redirects can preserve the body.
 
 ## Version 4
 
@@ -204,22 +218,35 @@ exits the process with status 1. Set `onConnectionLost(error)` to own that
 shutdown in your application. It runs once on terminal closure and may return
 a promise. A callback that throws or rejects falls back to the default exit.
 `app.destroy()` and explicit NATS close or drain are graceful shutdown paths.
+On teardown the SDK gives a connection drain up to five seconds to finish
+before closing the socket.
 
 For a restricted NATS user, set `inboxPrefix: '_INBOX_sandbox'` and allow
 subscription to `_INBOX_sandbox.>`. The prefix must be `_INBOX` (the default)
 or `_INBOX_<name>`, with letters, digits, underscores or hyphens in the name.
 The SDK and nats.js use it for request replies and JetStream delivery inboxes.
-SDK service and function handlers drop requests with other reply subjects.
-The SDK logs each rejection and increments `nats_invalid_reply_subject_total`.
+The reply guard changes handler behavior. SDK services and functions drop
+requests whose reply subject falls outside the accepted inbox formats or NATS
+account service mappings (`_R_`). A nats.js `noMux` request with an explicit
+reply subject must use an accepted inbox format. A JetStream push delivery
+subject used as a reply target through `core.subscribe()` is subject to the
+same guard. Use the JetStream consumer APIs for protocol acknowledgements and
+flow control. The SDK logs each rejection and increments
+`nats_invalid_reply_subject_total`.
 
 Set `options: { lockBucketName: 'marketplace_sandbox_lock' }` to put that
 app's mutexes in a separate KV bucket. The default is `lock`. Apps that
 coordinate via a shared mutex must use the same bucket. Provision the
-custom bucket before starting a restricted client, with memory storage,
-one replica and a TTL matching `options.lockTimeout` (10 seconds by default).
+restricted client's custom bucket before startup, with file storage on the
+persistent JetStream volume, one replica and a TTL matching
+`options.lockTimeout` (10 seconds by default).
 Enable direct reads on the bucket for the ACL shown below. The existing
 `registry` KV bucket must also be present. Opening these preprovisioned
 buckets checks stream metadata and leaves their settings as provisioned.
+The default `lock` bucket uses memory storage. On the first use of a missing
+bucket, a client with stream-create permissions can recreate it. A restricted
+client logs the failure and retries binding with backoff until the deploy job
+restores the bucket.
 
 | Operation | Publish subjects for the example configuration |
 | --- | --- |

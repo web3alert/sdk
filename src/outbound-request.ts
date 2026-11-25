@@ -1,4 +1,4 @@
-import { lookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { connect, isIP, type LookupFunction, type Socket } from 'node:net';
@@ -34,6 +34,8 @@ export interface OutboundRequestOptions extends OutboundLookupOptions {
   body?: string | Uint8Array;
   maxResponseBytes?: number;
   maxRedirects?: number;
+  /** Allow a redirect to another origin to send a body that the redirect preserves. */
+  allowCrossOriginBodyRedirects?: boolean;
   secretHeaders?: readonly string[];
   /** A trusted HTTP forward proxy origin. Targets are always tunneled by numeric IP. */
   proxy?: string | URL;
@@ -57,6 +59,7 @@ const errorMessages = {
   PROXY_FAILED: 'Outbound proxy connection failed',
   NETWORK_FAILED: 'Outbound network request failed',
   HTTP_STATUS: 'Outbound request returned an unsuccessful HTTP status',
+  REDIRECT_BODY_DENIED: 'Outbound redirect would send the request body to another origin',
   REDIRECT_LIMIT: 'Outbound redirect limit reached',
   RESPONSE_LIMIT: 'Outbound response exceeded the size limit',
   DEADLINE: 'Outbound deadline exceeded',
@@ -76,6 +79,8 @@ export class OutboundRequestError extends Error {
 const defaultPorts: Record<OutboundProtocol, number> = { 'http:': 80, 'https:': 443, 'ws:': 80, 'wss:': 443 };
 const defaultTimeoutMs = 10_000;
 const defaultMaxResponseBytes = 1024 * 1024;
+const dnsTimeoutMs = 2_000;
+const dnsTries = 1;
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 const controlledHeaders = new Set([
   'host', 'connection', 'proxy-connection', 'proxy-authorization', 'keep-alive',
@@ -104,8 +109,42 @@ function hostnameOf(url: URL): string {
   return url.hostname.startsWith('[') ? url.hostname.slice(1, -1) : url.hostname;
 }
 
-function systemResolve(hostname: string) {
-  return lookup(hostname, { all: true, verbatim: true });
+async function resolveDnsFamily(resolver: Resolver, hostname: string, family: 4 | 6): Promise<OutboundAddress[]> {
+  try {
+    const answers = await (family === 4 ? resolver.resolve4(hostname) : resolver.resolve6(hostname));
+    return answers.map(address => ({ address, family }));
+  } catch (error) {
+    // A negative DNS answer is safe to treat as empty. A failure to get an
+    // answer leaves the policy unable to validate that address family.
+    if (error instanceof Error && 'code' in error && (error.code === 'ENODATA' || error.code === 'ENOTFOUND')) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function systemResolve(hostname: string, signal: AbortSignal): Promise<OutboundAddress[]> {
+  if (hostname === 'localhost' || hostname === 'localhost.') {
+    return [{ address: '127.0.0.1', family: 4 }, { address: '::1', family: 6 }];
+  }
+
+  signal.throwIfAborted();
+  // cancel() applies to the whole resolver, so each lookup gets its own channel.
+  const resolver = new Resolver({ timeout: dnsTimeoutMs, tries: dnsTries });
+  const cancel = () => resolver.cancel();
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const [ipv4, ipv6] = await Promise.all([
+      resolveDnsFamily(resolver, hostname, 4),
+      resolveDnsFamily(resolver, hostname, 6),
+    ]);
+    return [...ipv4, ...ipv6];
+  } catch (error) {
+    if (!signal.aborted) cancel();
+    throw error;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+  }
 }
 
 function compilePolicy(policy: OutboundPolicy = {}) {
@@ -126,7 +165,7 @@ function compilePolicy(policy: OutboundPolicy = {}) {
       }
       return url.origin;
     }));
-    return { ports, origins, addressAllowed: createAddressCheck(policy.allowedPrivateCidrs), resolve: policy.resolve ?? systemResolve };
+    return { ports, origins, addressAllowed: createAddressCheck(policy.allowedPrivateCidrs), resolve: policy.resolve };
   } catch {
     throw new OutboundRequestError('INVALID_POLICY');
   }
@@ -149,12 +188,15 @@ function checkTarget(url: URL, policy: CompiledPolicy): Target {
   return { url, hostname, port, family };
 }
 
-async function resolveTarget(target: Target, policy: CompiledPolicy): Promise<OutboundAddress[]> {
+async function resolveTarget(target: Target, policy: CompiledPolicy, signal: AbortSignal): Promise<OutboundAddress[]> {
   if (target.family === 4 || target.family === 6) return [{ address: target.hostname, family: target.family }];
 
   let answers;
   try {
-    answers = (await policy.resolve(target.hostname)).map(({ address, family }) => ({ address, family }));
+    const resolved = policy.resolve
+      ? await policy.resolve(target.hostname)
+      : await systemResolve(target.hostname, signal);
+    answers = resolved.map(({ address, family }) => ({ address, family }));
   } catch {
     throw new OutboundRequestError('DNS_FAILED');
   }
@@ -214,9 +256,9 @@ export function createOutboundLookup(input: string | URL, options: OutboundLooku
   validateInteger(timeoutMs, 1, 2_147_483_647);
 
   return (hostname, lookupOptions, callback) => {
-    void withDeadline(timeoutMs, options.signal, async () => {
+    void withDeadline(timeoutMs, options.signal, async signal => {
       if (hostname.toLowerCase() !== target.hostname) throw new OutboundRequestError('ORIGIN_DENIED');
-      const answers = await resolveTarget(target, policy);
+      const answers = await resolveTarget(target, policy, signal);
       const requestedFamily = lookupOptions.family;
       const family = requestedFamily === 'IPv4' ? 4 : requestedFamily === 'IPv6' ? 6 : requestedFamily;
       const candidates = family === 4 || family === 6 ? answers.filter(answer => answer.family === family) : answers;
@@ -353,7 +395,7 @@ export async function guardedRequest(input: string | URL, options: OutboundReque
         checkDeadline();
         if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new OutboundRequestError('PROTOCOL_DENIED');
         const target = checkTarget(url, policy);
-        const [address] = await resolveTarget(target, policy);
+        const [address] = await resolveTarget(target, policy, requestSignal);
         checkDeadline();
         const tunnel = proxy && await openTunnel(proxy, target, address, requestSignal);
         let response: IncomingMessage | undefined;
@@ -366,15 +408,18 @@ export async function guardedRequest(input: string | URL, options: OutboundReque
           if (maxRedirects && location && redirectStatuses.has(status)) {
             if (redirects >= maxRedirects) throw new OutboundRequestError('REDIRECT_LIMIT');
             const next = parseUrl(location, url);
-            if (next.origin !== url.origin) {
-              for (const name of secrets) delete headers[name];
-            }
             if (((status === 301 || status === 302) && method === 'POST') || (status === 303 && method !== 'HEAD')) {
               method = 'GET';
               body = undefined;
               for (const name of ['content-type', 'content-encoding', 'content-language', 'content-location']) {
                 delete headers[name];
               }
+            }
+            if (next.origin !== url.origin) {
+              if (body !== undefined && options.allowCrossOriginBodyRedirects !== true) {
+                throw new OutboundRequestError('REDIRECT_BODY_DENIED');
+              }
+              for (const name of secrets) delete headers[name];
             }
             url = next;
             continue;

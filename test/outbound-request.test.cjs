@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const { createSocket } = require('node:dgram');
+const dns = require('node:dns/promises');
 const { once } = require('node:events');
 const { createServer } = require('node:http');
 const net = require('node:net');
@@ -39,6 +41,55 @@ function localUrl(port, path = '/') {
 
 function hasCode(code) {
   return error => error instanceof OutboundRequestError && error.code === code;
+}
+
+async function listenDns(t) {
+  const socket = createSocket('udp4');
+  socket.bind(0, loopback);
+  await once(socket, 'listening');
+  t.after(() => new Promise(resolve => socket.close(resolve)));
+  return socket;
+}
+
+function respondToDns(socket, query, peer) {
+  let offset = 12;
+  while (query[offset]) offset += query[offset] + 1;
+  offset++;
+  const type = query.readUInt16BE(offset);
+  const address = type === 1 ? Buffer.from([127, 0, 0, 1]) : Buffer.from('00000000000000000000000000000001', 'hex');
+  const header = Buffer.from('000081800001000100000000', 'hex');
+  query.copy(header, 0, 0, 2);
+  const answer = Buffer.alloc(12);
+  answer.writeUInt16BE(0xc00c, 0); // Name points to the original question.
+  answer.writeUInt16BE(type, 2);
+  answer.writeUInt16BE(1, 4); // IN class.
+  answer.writeUInt16BE(address.length, 10);
+  socket.send(Buffer.concat([header, query.subarray(12, offset + 4), answer, address]), peer.port, peer.address);
+}
+
+function observeDns(t, serverFor) {
+  const { Resolver } = dns;
+  const queries = [];
+  // Keep this test on loopback even when run against the previous implementation.
+  t.mock.method(dns, 'lookup', () => assert.fail('DNS must avoid the threadpool'));
+  const configured = new WeakSet();
+  for (const method of ['resolve4', 'resolve6']) {
+    const resolve = Resolver.prototype[method];
+    t.mock.method(Resolver.prototype, method, function (hostname) {
+      if (!configured.has(this)) {
+        this.setServers([`${loopback}:${serverFor(hostname).address().port}`]);
+        configured.add(this);
+      }
+      const promise = resolve.call(this, hostname);
+      queries.push({
+        hostname,
+        method,
+        outcome: promise.then(() => 'answered', error => error.code),
+      });
+      return promise;
+    });
+  }
+  return queries;
 }
 
 test('the IPv4 range table denies special-use networks and matches their boundaries', () => {
@@ -225,6 +276,116 @@ test('same-origin redirects retain credentials and cross-origin redirects strip 
   assert.deepEqual(seen.map(request => request.headers['x-correlation-id']), ['corr', 'corr', 'corr']);
   assert.equal(seen[0].headers['content-length'], '7');
   assert.equal(seen[1].headers['content-type'], undefined);
+});
+
+test('cross-origin redirects that preserve the body require a separate opt-in', async t => {
+  const received = [];
+  const target = await listen(t, createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({
+      method: request.method,
+      body: Buffer.concat(chunks).toString(),
+      authorization: request.headers.authorization,
+    });
+    response.end('ok');
+  }));
+  const origin = await listen(t, createServer(async (request, response) => {
+    if (request.url === '/same-origin') {
+      response.writeHead(308, { Location: '/echo' }).end();
+    } else if (request.url === '/echo') {
+      for await (const chunk of request) response.write(chunk);
+      response.end();
+    } else {
+      response.writeHead(Number(request.url.slice(1)), { Location: localUrl(target) }).end();
+    }
+  }));
+  const options = {
+    policy: localPolicy(origin, target), maxRedirects: 1, method: 'POST', body: 'fixture',
+    headers: { authorization: 'Bearer fixture' },
+  };
+  const response = await guardedRequest(localUrl(origin, '/same-origin'), options);
+  assert.equal(response.body.toString(), 'fixture');
+
+  for (const status of [307, 308]) {
+    await assert.rejects(guardedRequest(localUrl(origin, `/${status}`), options), hasCode('REDIRECT_BODY_DENIED'));
+  }
+  assert.deepEqual(received, []);
+
+  for (const status of [307, 308]) {
+    await guardedRequest(localUrl(origin, `/${status}`), { ...options, allowCrossOriginBodyRedirects: true });
+  }
+  assert.deepEqual(received, Array.from({ length: 2 }, () => ({
+    method: 'POST', body: 'fixture', authorization: undefined,
+  })));
+});
+
+const localhostAddresses = [
+  { address: loopback, family: 4 },
+  { address: '::1', family: 6 },
+];
+const localhostPolicy = { allowedPrivateCidrs: ['127.0.0.1/32', '::1/128'] };
+
+function lookupAll(hostname, options) {
+  const lookup = createOutboundLookup(`http://${hostname}`, options);
+  return new Promise((resolve, reject) => {
+    lookup(hostname, { all: true }, (error, addresses) => error ? reject(error) : resolve(addresses));
+  });
+}
+
+test('the default DNS resolver handles a burst while other resolvers stall', { timeout: 5_000 }, async t => {
+  const stalled = await listenDns(t);
+  const responsive = await listenDns(t);
+  responsive.on('message', (query, peer) => respondToDns(responsive, query, peer));
+  const queries = observeDns(t, name => name.startsWith('slow-') ? stalled : responsive);
+  const firstPacket = once(stalled, 'message');
+  const controller = new AbortController();
+  const outstanding = Promise.allSettled(['slow-one.test', 'slow-two.test'].map(hostname =>
+    guardedRequest(`http://${hostname}`, { signal: controller.signal })));
+  try {
+    await Promise.race([
+      firstPacket,
+      outstanding.then(() => assert.fail('stalled lookups finished before sending a DNS packet')),
+    ]);
+    const hostnames = Array.from({ length: 10 }, (_, index) => `ready-${index}.test`);
+    const answers = await Promise.all(hostnames.map(name => lookupAll(name, { policy: localhostPolicy })));
+    assert.deepEqual(answers, hostnames.map(() => localhostAddresses));
+    await assert.rejects(lookupAll('ready-mixed.test', {
+      policy: { allowedPrivateCidrs: ['127.0.0.1/32'] },
+    }), hasCode('ADDRESS_DENIED'));
+    const stalledQueries = queries.filter(query => query.hostname.startsWith('slow-'));
+    assert.equal(stalledQueries.length, 4);
+    const stillPending = Symbol('pending');
+    for (const { outcome } of stalledQueries) {
+      assert.equal(await Promise.race([outcome, Promise.resolve(stillPending)]), stillPending);
+    }
+  } finally {
+    controller.abort();
+  }
+  const outcomes = await outstanding;
+  assert.ok(outcomes.every(outcome => outcome.status === 'rejected' && hasCode('ABORTED')(outcome.reason)));
+  const cancelled = queries.filter(query => query.hostname.startsWith('slow-'));
+  assert.deepEqual(await Promise.all(cancelled.map(query => query.outcome)), Array(4).fill('ECANCELLED'));
+});
+
+test('the request deadline cancels both native DNS queries', { timeout: 5_000 }, async t => {
+  const stalled = await listenDns(t);
+  const queries = observeDns(t, () => stalled);
+  const firstPacket = once(stalled, 'message');
+  await Promise.all([
+    firstPacket,
+    assert.rejects(guardedRequest('http://deadline.test', { timeoutMs: 400 }), hasCode('DEADLINE')),
+  ]);
+  assert.deepEqual(queries.map(query => query.method).sort(), ['resolve4', 'resolve6']);
+  assert.deepEqual(await Promise.all(queries.map(query => query.outcome)), ['ECANCELLED', 'ECANCELLED']);
+});
+
+test('localhost resolves both families without consulting DNS or the hosts file', async t => {
+  t.mock.method(dns, 'lookup', () => assert.fail('localhost must avoid the threadpool'));
+  t.mock.method(dns, 'Resolver', () => assert.fail('localhost must avoid DNS'));
+  assert.deepEqual(await lookupAll('localhost', { policy: localhostPolicy }), localhostAddresses);
+  assert.deepEqual(await lookupAll('localhost.', { policy: localhostPolicy }), localhostAddresses);
+  await assert.rejects(lookupAll('localhost'), hasCode('ADDRESS_DENIED'));
 });
 
 test('the overall deadline expires during DNS and late DNS results cannot open a socket', async t => {
