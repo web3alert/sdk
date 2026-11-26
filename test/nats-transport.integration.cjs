@@ -32,15 +32,16 @@ async function fixture(t, config = '') {
   const connections = [];
   let broker;
   let stopped;
+  let logs;
 
   async function start() {
     broker = spawn('nats-server', ['-c', configPath, '-js', '-a', '127.0.0.1', '-p', String(port),
       '-sd', directory], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let logs = '';
+    logs = '';
     let spawnError;
     broker.on('error', error => { spawnError = error; });
     broker.stderr.on('data', data => { logs += data; });
-    stopped = new Promise(resolve => broker.once('close', resolve));
+    stopped = new Promise(resolve => broker.once('close', (code, signal) => resolve({ code, signal })));
     await until(() => {
       if (spawnError) throw spawnError;
       assert.equal(broker.exitCode, null, logs);
@@ -50,9 +51,14 @@ async function fixture(t, config = '') {
 
   async function stop() {
     if (!broker) return;
-    broker.kill('SIGTERM');
-    assert.equal(await stopped, 0);
+    const shutdownOffset = logs.length;
+    const sent = broker.exitCode === null && broker.signalCode === null && broker.kill('SIGTERM');
+    const { code, signal } = await stopped;
     broker = undefined;
+    const failure = `NATS did not shut down cleanly (SIGTERM sent: ${sent}, code: ${code}, signal: ${signal})\n${logs}`;
+    // A graceful SIGTERM returns 1 on 2.10 and 0 on 2.15.
+    assert.ok(sent && signal === null && (code === 0 || code === 1), failure);
+    assert.match(logs.slice(shutdownOffset), /\[INF\] Server Exiting\.\.(?:\r?\n|$)/, failure);
   }
 
   t.after(async () => {
@@ -145,7 +151,6 @@ test('the same app resumes its service, subscription, durable, registry and mute
   const reader = await core.stream.subscribe(client.telemetry.child('reader'), 'durable', stream.ref,
     async ({ data }) => { delivered.push(data); });
   const info = () => core.jsm.consumers.info(stream.ref.stream, 'durable');
-  const before = await info();
   assert.equal((await core.jsm.streams.info('KV_lock')).config.storage, 'memory');
   const lock = core.mutex('recover');
   const peer = await f.open();
@@ -173,6 +178,8 @@ test('the same app resumes its service, subscription, durable, registry and mute
     await acquire(lock);
     await exercise('before');
     await until(async () => (await info()).ack_floor.stream_seq === 1, 'first message was not ACKed');
+    const before = await info();
+    assert.equal(before.ack_floor.consumer_seq, 1);
 
     // The nats.js default allows ten attempts about two seconds apart.
     await f.stop();
@@ -181,6 +188,14 @@ test('the same app resumes its service, subscription, durable, registry and mute
     assert.equal(nc.isClosed(), false, 'connection exhausted reconnect attempts during the outage');
     await f.start();
     await until(() => events.some(event => event.type === 'reconnect'), 'reconnect not reported');
+
+    // A recreated durable starts with a fresh consumer sequence, even if its
+    // name and stream position are the same. 2.10 can restamp created on restart.
+    const resumed = await info();
+    for (const field of ['delivered', 'ack_floor']) {
+      assert.equal(resumed[field].consumer_seq, before[field].consumer_seq, `${field} consumer sequence survived`);
+      assert.equal(resumed[field].stream_seq, before[field].stream_seq, `${field} stream sequence survived`);
+    }
 
     assert.equal(await core.registry.get('reconnect'), 'before');
     await until(() => peerEvents.some(event => event.type === 'reconnect'), 'peer reconnect not reported');
@@ -191,7 +206,7 @@ test('the same app resumes its service, subscription, durable, registry and mute
     assert.equal(recovered.config.max_age, 10_000_000_000);
     await exercise('after');
     await until(async () => (await info()).ack_floor.stream_seq === 2, 'second message was not ACKed');
-    assert.equal((await info()).created, before.created);
+    assert.equal((await info()).ack_floor.consumer_seq, before.ack_floor.consumer_seq + 1);
     assert.deepEqual(delivered, ['before', 'after']);
     assert.deepEqual(f.lost, []);
     assert.deepEqual(f.errors, []);
