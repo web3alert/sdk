@@ -51,14 +51,11 @@ async function fixture(t, config = '') {
 
   async function stop() {
     if (!broker) return;
-    const shutdownOffset = logs.length;
-    const sent = broker.exitCode === null && broker.signalCode === null && broker.kill('SIGTERM');
+    const sent = broker.exitCode === null && broker.signalCode === null && broker.kill('SIGINT');
     const { code, signal } = await stopped;
     broker = undefined;
-    const failure = `NATS did not shut down cleanly (SIGTERM sent: ${sent}, code: ${code}, signal: ${signal})\n${logs}`;
-    // A graceful SIGTERM returns 1 on 2.10 and 0 on 2.15.
-    assert.ok(sent && signal === null && (code === 0 || code === 1), failure);
-    assert.match(logs.slice(shutdownOffset), /\[INF\] Server Exiting\.\.(?:\r?\n|$)/, failure);
+    assert.ok(sent, `Could not send SIGINT to the running NATS broker\n${logs}`);
+    assert.deepEqual({ code, signal }, { code: 0, signal: null }, `NATS did not exit cleanly after SIGINT\n${logs}`);
   }
 
   t.after(async () => {
@@ -151,6 +148,7 @@ test('the same app resumes its service, subscription, durable, registry and mute
   const reader = await core.stream.subscribe(client.telemetry.child('reader'), 'durable', stream.ref,
     async ({ data }) => { delivered.push(data); });
   const info = () => core.jsm.consumers.info(stream.ref.stream, 'durable');
+  const createdAtSetup = (await info()).created;
   assert.equal((await core.jsm.streams.info('KV_lock')).config.storage, 'memory');
   const lock = core.mutex('recover');
   const peer = await f.open();
@@ -179,6 +177,7 @@ test('the same app resumes its service, subscription, durable, registry and mute
     await exercise('before');
     await until(async () => (await info()).ack_floor.stream_seq === 1, 'first message was not ACKed');
     const before = await info();
+    assert.equal(before.created, createdAtSetup, 'durable was replaced before its first ACK');
     assert.equal(before.ack_floor.consumer_seq, 1);
 
     // The nats.js default allows ten attempts about two seconds apart.
